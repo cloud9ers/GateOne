@@ -308,7 +308,7 @@ var go = GateOne.Base.update(GateOne, {
             if (missingCapabilities.length) {
                 // Notify the user of the problems and cancel the init() process
                 if (criticalFailure) {
-                    alert("Sorry but your browser is missing the following capabilities which are required to run Gate One: \n" + missingCapabilities.join('\n') + "\n\nGate One will not be loaded.");
+                    console.error("Sorry but your browser is missing the following capabilities which are required to run Gate One: \n" + missingCapabilities.join('\n') + "\n\nGate One will not be loaded.");
                     return;
                 } else {
                     if (!localStorage[go.prefs.prefix+'disableWarning']) {
@@ -339,7 +339,7 @@ var go = GateOne.Base.update(GateOne, {
                         }
                         setTimeout(function() {
                             // Have to wrap this in a timeout or it won't show up.
-                            go.Visual.alert('Warning', container);
+                            console.warn('Warning', container);
                         }, 2000);
                     }
                 }
@@ -1083,7 +1083,7 @@ GateOne.Base.update(GateOne.Utils, {
             // TODO:  Remove postOnLoad support in a future release.
             logDebug('Running: ' + moduleObj.NAME + '.postOnLoad()');
             if (typeof(moduleObj.postOnLoad) == "function") {
-                go.Visual.displayMessage('WARNING: Deprecated postOnLoad() function found in ' + moduleObj.NAME + '. "postOnLoad" has been renamed "postInit" and support for the older naming will be removed in a future version of Gate One.');
+                console.warn('WARNING: Deprecated postOnLoad() function found in ' + moduleObj.NAME + '. "postOnLoad" has been renamed "postInit" and support for the older naming will be removed in a future version of Gate One.');
                 moduleObj.postOnLoad();
             }
             logDebug('Running: ' + moduleObj.NAME + '.postInit()');
@@ -1247,7 +1247,7 @@ GateOne.Base.update(GateOne.Utils, {
                         window.location.href = acceptURL + '?url=' + window.location.href.replace(/:\/\/(.*@)?/g, '://'+u.randomString(8)+'@');
                     }
                 // Redirect the user to a page where they can accept the SSL certificate (it will redirect back)
-                GateOne.Visual.alert("SSL Certificate Error", "Click OK to be directed to a page where you can accept the Gate One server's SSL certificate.  If the page doesn't load it means the Gate One server is currently unavailable.", okCallback);
+                console.error("SSL Certificate Error", "Click OK to be directed to a page where you can accept the Gate One server's SSL certificate.  If the page doesn't load it means the Gate One server is currently unavailable.", okCallback);
             }
         }, 5000);
     },
@@ -1288,7 +1288,7 @@ GateOne.Base.update(GateOne.Utils, {
         }
         localStorage[prefs.prefix+'prefs'] = JSON.stringify(userPrefs);
         if (!skipNotification) {
-            GateOne.Visual.displayMessage("Preferences have been saved.");
+            console.info("Preferences have been saved.");
         }
     },
     loadPrefs: function() {
@@ -1375,8 +1375,8 @@ GateOne.Base.update(GateOne.Utils, {
             var blob = u.createBlob(message['data'], mimetype);
             u.saveAs(blob, message['filename']);
         } else {
-            go.Visual.displayMessage('An error was encountered trying to save a file...');
-            go.Visual.displayMessage(message['result']);
+            console.info('An error was encountered trying to save a file...');
+            console.info(message['result']);
         }
     },
     // NOTE: The token-based approach prevents an attacker from copying a user's session ID to another host and using it to login but it has the disadvantage of requiring that the user re-login if they reload the page or close their tab.
@@ -1522,9 +1522,9 @@ GateOne.Base.update(GateOne.Net, {
         u.deleteCookie('gateone_user', '/', '');
         delete localStorage[prefix+'gateone_user']; // Also clear this if it is set
         if (go.prefs.auth) {
-            v.alert('API Authentication Failure', "The API authentication object was denied by the server.  Usually this means that one of the following is true:<ul style='width: 75%; margin-left: auto; margin-right: auto; text-align: left;'><li>The server's cookie_secret has changed and you must reauthenticate.  Simply reloading the page <i>once</i> will correct this.  Note that it is considered best practices to change the server's cookie_secret from time to time.</li><li>The api_keys parameter in Gate One's server.conf is not set correctly.</li><li>The Gate One server isn't configured to use API authentication ('auth = \"api\"' in the server.conf).</li><li>The API authentication object has expired.  This usually means the Gate One server was restarted or the clocks on one (or more) servers are set incorrectly (e.g. due to drift).</li><li>You are the victim of a Man-in-the-Middle attack.  Someone or <i>something</i> may have intercepted your API authentication object and already used it gain access to your session.  If this was the case you would have seen a message like, \"API authentication replay attack detected!\" appear as a notification at least once with similar messages logged on the server.  If you didn't see any such notification then it is highly likely that the problem is due to one of the aforementioned items.</li></ul><br><br>Click OK to reload the page.", redirect);
+            console.error('API Authentication Failure', "The API authentication object was denied by the server.  Usually this means that one of the following is true:<ul style='width: 75%; margin-left: auto; margin-right: auto; text-align: left;'><li>The server's cookie_secret has changed and you must reauthenticate.  Simply reloading the page <i>once</i> will correct this.  Note that it is considered best practices to change the server's cookie_secret from time to time.</li><li>The api_keys parameter in Gate One's server.conf is not set correctly.</li><li>The Gate One server isn't configured to use API authentication ('auth = \"api\"' in the server.conf).</li><li>The API authentication object has expired.  This usually means the Gate One server was restarted or the clocks on one (or more) servers are set incorrectly (e.g. due to drift).</li><li>You are the victim of a Man-in-the-Middle attack.  Someone or <i>something</i> may have intercepted your API authentication object and already used it gain access to your session.  If this was the case you would have seen a message like, \"API authentication replay attack detected!\" appear as a notification at least once with similar messages logged on the server.  If you didn't see any such notification then it is highly likely that the problem is due to one of the aforementioned items.</li></ul><br><br>Click OK to reload the page.", redirect);
         } else {
-            v.alert('Authentication Failure', 'You must re-authenticate with the Gate One server.  The page will now be reloaded.', redirect);
+            console.error('Authentication Failure', 'You must re-authenticate with the Gate One server.  The page will now be reloaded.', redirect);
         }
     },
     sendDimensions: function(term, /*opt*/ctrl_l) {
@@ -1583,24 +1583,8 @@ GateOne.Base.update(GateOne.Net, {
         setTimeout(go.Net.connect, 5000);
     },
     sslError: function(callback) {
-        // Called when we fail to connect due to an SSL error (user must accept the SSL certificate).  It opens a dialog where the user can click accept
-        // *callback* will be called when the user closes the dialog
-        GateOne.Net.connectionProblem = true;
-        // NOTE:  Only likely to happen in situations where Gate One is embedded into another application
-        var go = GateOne,
-            u = go.Utils,
-            acceptURL = go.prefs.url + 'static/accept_certificate.html',
-            sslAcceptIframe = u.createElement('iframe', {'id': 'ssl_accept', 'src': acceptURL, 'style': {'width': '80%', 'height': '93%'}}),
-            container = u.createElement('div', {'style': {'text-align': 'center', 'width': '40em', 'height': '20em'}}),
-            done = u.createElement('button', {'type': 'submit', 'value': 'Submit', 'class': 'button black'}),
-            closeDialog = go.Visual.dialog('Please accept the SSL certificate', container);
-        done.innerHTML = "Done";
-        container.appendChild(sslAcceptIframe);
-        container.appendChild(done);
-        done.onclick = function(e) {
-            callback();
-            closeDialog();
-        }
+        // No need for showing SSL errors, it is disabled anyway
+        console.error('SSL Error!') // Only log just in case
     },
     connect: function() {
         // Connects to the WebSocket defined in GateOne.prefs.url
@@ -2334,7 +2318,7 @@ GateOne.Base.update(GateOne.Input, {
                 goIn.emulateKey(e, true); // Pretend this never happened
                 go.Net.sendChars();
             }, 750);
-            GateOne.Visual.displayMessage("NOTE: Rapidly pressing F11 twice will enable/disable fullscreen mode.");
+            console.info("NOTE: Rapidly pressing F11 twice will enable/disable fullscreen mode.");
             return;
         }
         if (key.string == "KEY_UNKNOWN") {
@@ -3286,7 +3270,7 @@ GateOne.Base.update(GateOne.Visual, {
     },
     serverMessageAction: function(message) {
         // Displays a *message* sent from the server
-        GateOne.Visual.displayMessage(message);
+        console.info(message);
     },
     CSSPluginAction: function(url) {
         // Loads the CSS for a given plugin by adding a <link> tag to the <head>
@@ -4348,13 +4332,13 @@ go.Base.update(GateOne.Terminal, {
         // Notifies the user of inactivity in *term*
         var message = "Inactivity in terminal: " + term;
         GateOne.Visual.playBell();
-        GateOne.Visual.displayMessage(message);
+        console.info(message);
     },
     notifyActivity: function(term) {
         // Notifies the user of activity in *term*
         var message = "Activity in terminal: " + term;
         GateOne.Visual.playBell();
-        GateOne.Visual.displayMessage(message);
+        console.info(message);
     },
     newTerminal: function(/*Opt:*/term, /*Opt:*/type, /*Opt*/where) {
         // Adds a new terminal to the grid and starts updates with the server.
@@ -4594,7 +4578,7 @@ go.Base.update(GateOne.Terminal, {
         delete go.terminals[term];
         // Now find out what the previous terminal was and move to it
         var terms = u.toArray(u.getNodes(go.prefs.goDiv + ' .terminal'));
-        go.Visual.displayMessage(message);
+        console.info(message);
         terms.forEach(function(termObj) {
             lastTerm = termObj;
         });
