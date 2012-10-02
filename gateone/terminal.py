@@ -768,6 +768,7 @@ class Terminal(object):
             'c': self._csi_device_status_report, # Device status report (DSR)
             'g': self.__ignore, # TODO: Tab clear
             'h': self.set_expanded_mode,
+            'i': self.__ignore, # ESC[5i is "redirect to printer", ESC[4i ends it
             'l': self.reset_expanded_mode,
             'f': self.cursor_position,
             'd': self.cursor_position_vertical, # Vertical Line Position Absolute (VPA)
@@ -795,7 +796,7 @@ class Terminal(object):
         self.expanded_modes = {
             # Expanded modes take a True/False argument for set/reset
             '1': self.set_application_mode,
-            '2': self.__ignore, # DECANM and set VT100 mode
+            '2': self.__ignore, # DECANM and set VT100 mode (also: lock keyboard)
             '3': self.__ignore, # 132 Column Mode (DECCOLM)
             '4': self.__ignore, # Smooth (Slow) Scroll (DECSCLM)
             '5': self.__ignore, # Reverse video (might support in future)
@@ -857,7 +858,7 @@ class Terminal(object):
         # ambiguous.
         jpeg_header = re.compile('.*\xff\xd8\xff.+JFIF\x00|.*\xff\xd8\xff.+Exif\x00', re.DOTALL)
         jpeg_whole = re.compile(
-            '\xff\xd8\xff.+JFIF\x00.+\xff\xd9(?!\xff)|\xff\xd8\xff.+Exif\x00.+\xff\xd9(?!\xff)', re.DOTALL)
+            '\xff\xd8\xff.+JFIF\x00.*?\xff\xd9|\xff\xd8\xff.+Exif\x00.*?\xff\xd9', re.DOTALL)
         self.magic = {
             # Dict for magic "numbers" so we can tell when a particular type of
             # file begins and ends (so we can capture it in binary form and
@@ -1304,9 +1305,15 @@ class Terminal(object):
             before_chars = ""
             after_chars = ""
             for magic_header in magic.keys():
-                if magic_header.match(str(chars)):
-                    self.matched_header = magic_header
-                    self.timeout_image = datetime.now()
+                try:
+                    if magic_header.match(str(chars)):
+                        self.matched_header = magic_header
+                        self.timeout_image = datetime.now()
+                except UnicodeEncodeError:
+                    # Gibberish; drop it and pretend it never happened
+                    self.esc_buffer = ""
+                    # Make it so it won't barf
+                    chars = chars.encode('UTF-8', 'ignore')
             if self.image or self.matched_header:
                 self.image += chars
                 match = magic[self.matched_header].search(self.image)

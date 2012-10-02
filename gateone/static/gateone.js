@@ -589,8 +589,6 @@ var go = GateOne.Base.update(GateOne, {
                 go.Net.sendDimensions();
             }, 3000);
         }
-        // Connect to the server
-//         go.Net.connect();
         // Apply user-specified dimension styles and settings
         go.Visual.applyStyle(goDiv, go.prefs.style);
         if (go.prefs.fillContainer) {
@@ -689,11 +687,29 @@ var go = GateOne.Base.update(GateOne, {
             }
             go.resizeEventTimer = setTimeout(function() {
                 // Wrapped in a timeout to de-bounce
-                if (u.getNode(go.prefs.goDiv).style.display != "none") {
+                var term = localStorage[prefix+'selectedTerminal'],
+                    terminalObj = go.terminals[term],
+                    termPre = terminalObj['node'],
+                    screenNode = terminalObj['screenNode'],
+                    emHeight = u.getEmDimensions(goDiv).h;
+                if (goDiv.style.display != "none") {
                     go.Visual.updateDimensions();
                     go.Net.sendDimensions();
                 }
-            }, 500);
+                // Adjust the view so the scrollback buffer stays hidden unless the user scrolls
+                if (!go.prefs.embedded) {
+                    // In embedded mode this kind of adjustment can be unreliable
+                    GateOne.Visual.applyTransform(termPre, ''); // Need to reset before we do calculations
+                    go.resizeAdjustTimer = setTimeout(function() {
+                        var distance = goDiv.clientHeight - screenNode.offsetHeight;
+                        distance -= (emHeight * go.prefs.rowAdjust); // Have to adjust for the extra row we add for the playback controls
+                        if (GateOne.Utils.isVisible(termPre)) {
+                            var transform = "translateY(-" + distance + "px)";
+                            GateOne.Visual.applyTransform(termPre, transform); // Move it to the top so the scrollback isn't visible unless you actually scroll
+                        }
+                    }, 500);
+                }
+            }, 750);
         }
         window.onresize = onResizeEvent;
         // Setup a callback that updates the CSS options whenever the panel is opened (so the user doesn't have to reload the page when the server has new CSS files).
@@ -1751,6 +1767,7 @@ GateOne.Base.update(GateOne.Input, {
         logDebug('capture()');
         var go = GateOne,
             u = go.Utils,
+            prefix = go.prefs.prefix,
             goDiv = u.getNode(go.prefs.goDiv);
         goDiv.tabIndex = 1; // Just in case--this is necessary to set focus
         goDiv.onkeydown = go.Input.onKeyDown;
@@ -1801,13 +1818,16 @@ GateOne.Base.update(GateOne.Input, {
             // TODO: Add a shift-click context menu for special operations.  Why shift and not ctrl-click or alt-click?  Some platforms use ctrl-click to emulate right-click and some platforms use alt-click to move windows around.
             logDebug("goDiv.onmousedown() button: " + e.button + ", which: " + e.which);
             var m = go.Input.mouse(e),
+                selectedTerm = localStorage[prefix+'selectedTerminal'],
+                selectedPastearea = go.terminals[selectedTerm]['pasteNode'],
                 selectedText = u.getSelText();
             go.Input.mouseDown = true;
             // This is kinda neat:  By setting "contentEditable = true" we can right-click to paste.
             // However, we only want this when the user is actually bringing up the context menu because
             // having it enabled slows down screen updates by a non-trivial amount.
             if (m.button.middle) {
-                u.showElements('.pastearea');
+                u.showElement(selectedPastearea);
+                selectedPastearea.focus();
                 if (selectedText.length) {
                     go.Input.handlingPaste = true; // We're emulating a paste so we might as well act like one
                     // Only preventDefault if text is selected so we don't muck up X11-style middle-click pasting
@@ -1819,12 +1839,31 @@ GateOne.Base.update(GateOne.Input, {
                     }, 250);
                 }
             } else if (m.button.right) {
-                if (!u.getSelText()) {
+                if (!selectedText.length) {
                     // Redisplay the pastearea so we can get a proper context menu in case the user wants to paste
-                    u.showElements('.pastearea');
+                    // NOTE: On Firefox this behavior is broken.  See: https://bugzilla.mozilla.org/show_bug.cgi?id=785773
+                    u.showElement(selectedPastearea);
+                    selectedPastearea.focus();
+                } else {
+                    goDiv.focus();
                 }
+            } else {
+                if (navigator.userAgent.indexOf('Firefox') != -1) {
+                    if (go.Input.firefoxBugTimer) {
+                        clearTimeout(go.Input.firefoxBugTimer);
+                        go.Input.firefoxBugTimer = null;
+                    }
+                    go.Input.firefoxBugTimer = setTimeout(function() {
+                        if (!u.getSelText().length) {
+                            go.Visual.displayMessage("NOTE: Having trouble selecting text in Firefox?  It's a browser bug!  <br>WORKAROUND: Double-click something <i>then</i> you should be able to highlight whatever you want.", 5000, 10000);
+                            go.Visual.displayMessage("Please click <a href='https://bugzilla.mozilla.org/show_bug.cgi?id=785773'>here</a> to vote and comment on the problem so we can get it fixed.", 5000, 10000);
+                            logInfo("If the Firefox devs fixed the following bug you wouldn't see this message!");
+                            logInfo("https://bugzilla.mozilla.org/show_bug.cgi?id=785773 <--Vote for it.  The squeaky wheel gets the oil.");
+                        }
+                    }, 500);
+                }
+                goDiv.focus();
             }
-            u.getNode(go.prefs.goDiv).focus();
         }
         goDiv.onmouseup = function(e) {
             logDebug("goDiv.onmouseup: e.button: " + e.button + ", e.which: " + e.which);
@@ -1844,7 +1883,12 @@ GateOne.Base.update(GateOne.Input, {
                     if (!u.getSelText()) {
                         u.showElements('.pastearea');
                     }
-                }, 100);
+                }, 750); // NOTE: For this to work (to allow users to double-click-to-highlight a word) they must double-click before this timer fires.
+            }
+            // If the Firefox bug timer hasn't fired by now it wasn't a click-and-drag event
+            if (go.Input.firefoxBugTimer) {
+                clearTimeout(go.Input.firefoxBugTimer);
+                go.Input.firefoxBugTimer = null;
             }
             goDiv.focus();
         }
@@ -2596,9 +2640,11 @@ GateOne.Base.update(GateOne.Visual, {
     },
     updateDimensions: function() { // Sets GateOne.Visual.goDimensions to the current width/height of prefs.goDiv
         var u = go.Utils,
+            prefix = go.prefs.prefix,
             goDiv = u.getNode(go.prefs.goDiv),
+            currentTerm = localStorage[prefix+'selectedTerminal'],
             terms = u.toArray(u.getNodes(go.prefs.goDiv + ' .terminal')),
-            wrapperDiv = u.getNode('#'+go.prefs.prefix+'termwrapper'),
+            wrapperDiv = u.getNode('#'+prefix+'termwrapper'),
             style = window.getComputedStyle(goDiv, null),
             rightAdjust = 0,
             paddingRight = (style['padding-right'] || style['paddingRight']);
@@ -2617,6 +2663,8 @@ GateOne.Base.update(GateOne.Visual, {
                 });
             }
         }
+        // This ensures that whatever effects are applied to a terminal when switching to it get applied when resized too:
+        go.Terminal.switchTerminal(currentTerm);
     },
     applyTransform: function (obj, transform) {
         // Applys the given CSS3 *transform* to *obj* for all known vendor prefixes (e.g. -<whatever>-transform)
@@ -2780,6 +2828,7 @@ GateOne.Base.update(GateOne.Visual, {
             }, 1100);
         }
     },
+    // TODO: Get this *actually* centering the terminal title info
     displayTermInfo: function(term) {
         // Displays the given term's information as a psuedo tooltip that eventually fades away
         var u = go.Utils,
@@ -2999,12 +3048,38 @@ GateOne.Base.update(GateOne.Visual, {
             v.scrollbackToggle = true;
         }
     },
+    disableTransitions: function(elem) {
+        /**:GateOne.Visual.disableTransitions(elem)
+
+        Sets the 'noanimate' class on *elem* which can be a node or querySelector-like string (e.g. #someid).  This class sets all CSS3 transformations to happen instantly without delay (which would animate).
+        */
+        var go = GateOne,
+            u = go.Utils,
+            node = u.getNode(elem);
+        if (node.className.indexOf('noanimate') == -1) {
+            node.className += " noanimate";
+        }
+    },
+    enableTransitions: function(elem) {
+        /**:GateOne.Visual.enableTransitions(elem)
+
+        Removes the 'noanimate' class from *elem* (if set) which can be a node or querySelector-like string (e.g. #someid).
+        */
+        var go = GateOne,
+            u = go.Utils,
+            node = u.getNode(elem);
+        node.className = node.className.replace(/(?:^|\s)noanimate(?!\S)/, '');
+    },
+    // TODO: Change this so it doesn't hard-code things like setting the terminal title or fixing the activity checkboxes (use a callback array like everything else)
     slideToTerm: function(term) {
-        // Slides the view to the given *term*.
+        // Slides the view to the given *term*.  If *GateOne.Visual.noReset* is true, don't reset the grid before switching
         var u = go.Utils,
             v = go.Visual,
-            termObj = u.getNode('#'+go.prefs.prefix+'term' + term),
-            termTitleH2 = u.getNode('#'+go.prefs.prefix+'termtitle'),
+            prefix = go.prefs.prefix,
+            currentTerm = localStorage[prefix+'selectedTerminal'],
+            currentTermObj = u.getNode('#'+prefix+'term'+currentTerm),
+            termObj = u.getNode('#'+prefix+'term' + term),
+            termTitleH2 = u.getNode('#'+prefix+'termtitle'),
             displayText = "",
             count = 0,
             wPX = 0,
@@ -3015,10 +3090,17 @@ GateOne.Base.update(GateOne.Visual, {
             bottomAdjust = 0,
             reScrollback = u.partial(v.enableScrollback, term),
             paddingRight = (style['padding-right'] || style['paddingRight']),
-            paddingBottom = (style['padding-bottom'] || style['paddingBottom']);
+            paddingBottom = (style['padding-bottom'] || style['paddingBottom']),
+            setActivityCheckboxes = function(term) {
+                var monitorInactivity = u.getNode('#'+prefix+'monitor_inactivity'),
+                    monitorActivity = u.getNode('#'+prefix+'monitor_activity');
+                monitorInactivity.checked = go.terminals[term]['inactivityTimer']
+                monitorActivity.checked = go.terminals[term]['activityNotify'];
+            };
         if (termObj) {
-            displayText = termObj.id.split(go.prefs.prefix+'term')[1] + ": " + termObj.title;
+            displayText = termObj.id.split(prefix+'term')[1] + ": " + termObj.title;
             termTitleH2.innerHTML = displayText;
+            setActivityCheckboxes(term);
         } else {
             return; // This can happen if the terminal closed before a timeout completed.  Not a big deal, ignore
         }
@@ -3028,30 +3110,58 @@ GateOne.Base.update(GateOne.Visual, {
         if (paddingRight != "0px") {
             bottomAdjust = parseInt(paddingRight.split('px')[0]);
         }
-        go.Net.setTerminal(term);
-        u.getNode('#'+go.prefs.prefix+'sideinfo').innerHTML = displayText;
-        // Have to scroll all the way to the top in order for the translate effect to work properly:
-        u.getNode(go.prefs.goDiv).scrollTop = 0;
-        terms.forEach(function(termObj) {
-            // Loop through once to get the correct wPX and hPX values
-            count = count + 1;
-            if (termObj.id == go.prefs.prefix+'term' + term) {
-                if (u.isEven(count)) {
-                    wPX = ((v.goDimensions.w+rightAdjust) * 2) - (v.goDimensions.w+rightAdjust);
-                    hPX = (((v.goDimensions.h+bottomAdjust) * count)/2) - (v.goDimensions.h+(bottomAdjust*Math.floor(count/2)));
-                } else {
-                    wPX = 0;
-                    hPX = (((v.goDimensions.h+bottomAdjust) * (count+1))/2) - (v.goDimensions.h+(bottomAdjust*Math.floor(count/2)));
+        u.getNode('#'+prefix+'sideinfo').innerHTML = displayText;
+        // Reset the grid so that all terminals are in their default positions before we do the switch
+        if (!v.noReset) {
+            v.resetGrid();
+        } else {
+            v.noReset = false; // Reset the reset :)
+        }
+        terms.forEach(function(termNode) {
+            // resetGrid() turns transitions on when it's done doing its thing.  We have to turn them back off before we start up our animation process below or it will start up all wonky.
+            v.disableTransitions(termNode);
+        });
+        setTimeout(function() { // This is wrapped in a 1ms timeout to ensure the browser applies it AFTER the first set of transforms are applied.  Otherewise it will happen so fast that the animation won't take place.
+            terms.forEach(function(termNode) {
+                // Calculate all the width and height adjustments so we know where to move them
+                v.enableTransitions(termNode);  // Turn animations back on in preparation for the next step
+                count = count + 1;
+                if (termNode.id == prefix+'term' + term) { // Use the terminal we're switching to this time
+                    if (u.isEven(count)) {
+                        wPX = ((v.goDimensions.w+rightAdjust) * 2) - (v.goDimensions.w+rightAdjust);
+                        hPX = (((v.goDimensions.h+bottomAdjust) * count)/2) - (v.goDimensions.h+(bottomAdjust*Math.floor(count/2)));
+                    } else {
+                        wPX = 0;
+                        hPX = (((v.goDimensions.h+bottomAdjust) * (count+1))/2) - (v.goDimensions.h+(bottomAdjust*Math.floor(count/2)));
+                    }
                 }
-            }
-        });
-        terms.forEach(function(termObj) {
-            if (termObj.id == go.prefs.prefix+'term' + term) {
-                v.applyTransform(termObj, 'translate(-' + wPX + 'px, -' + hPX + 'px)');
-            } else {
-                v.applyTransform(termObj, 'translate(-' + wPX + 'px, -' + hPX + 'px) scale(0.5)');
-            }
-        });
+            });
+            terms.forEach(function(termNode) {
+                // Move each terminal into position
+                if (termNode.id == prefix+'term' + term) { // Apply to the terminal we're switching to
+                    v.applyTransform(termNode, 'translate(-' + wPX + 'px, -' + hPX + 'px)');
+                } else {
+                    v.applyTransform(termNode, 'translate(-' + wPX + 'px, -' + hPX + 'px) scale(0.5)');
+                }
+            });
+        }, 1);
+        // Now hide everything but the terminal in the primary view
+        if (v.hiddenTermsTimer) {
+            clearTimeout(v.hiddenTermsTimer);
+            v.hiddenTermsTimer = null;
+        }
+        v.hiddenTermsTimer = setTimeout(function() {
+            terms.forEach(function(termNode) {
+                v.disableTransitions(termNode);
+                if (termNode.id == prefix+'term' + term) {
+                    // This will be the only visible terminal so we need it front and center...
+                    v.applyTransform(termNode, 'translate(0px, 0px)');
+                    termNode.style.display = null;
+                } else {
+                    termNode.style.display = 'none';
+                }
+            });
+        }, 1000); // NOTE:  This is 1s based on the assumption that the CSS has the transition configured to take 1s.
         v.displayTermInfo(term);
         if (!v.scrollbackToggle) {
             // Cancel any pending scrollback timers to keep the user experience smooth
@@ -3139,12 +3249,64 @@ GateOne.Base.update(GateOne.Visual, {
             }
         }
     },
+    resetGrid: function() {
+        /**:GateOne.Visual.resetGrid()
+
+        Places all terminals in their proper position in the grid instantly (no animations).
+        */
+        var go = GateOne,
+            u = go.Utils,
+            v = go.Visual,
+            prefix = go.prefs.prefix,
+            wPX = 0,
+            hPX = 0,
+            count = 0,
+            currentTerm = localStorage[prefix+'selectedTerminal'],
+            terms = u.toArray(u.getNodes(go.prefs.goDiv + ' .terminal')),
+            style = window.getComputedStyle(u.getNode(go.prefs.goDiv), null),
+            rightAdjust = 0,
+            bottomAdjust = 0,
+            paddingRight = (style['padding-right'] || style['paddingRight']),
+            paddingBottom = (style['padding-bottom'] || style['paddingBottom']);
+        if (paddingRight != "0px") {
+            rightAdjust = parseInt(paddingRight.split('px')[0]);
+        }
+        if (paddingRight != "0px") {
+            bottomAdjust = parseInt(paddingRight.split('px')[0]);
+        }
+        u.getNode(go.prefs.goDiv).scrollTop = 0; // Move the view to the top so everything lines up and our calculations can be acurate
+        terms.forEach(function(termNode) {
+            // Calculate all the width and height adjustments so we know where to move them
+            count = count + 1;
+            if (termNode.id == prefix+'term' + currentTerm) { // Pretend we're switching to what's right in front of us (current terminal)
+                if (u.isEven(count)) {
+                    wPX = ((v.goDimensions.w+rightAdjust) * 2) - (v.goDimensions.w+rightAdjust);
+                    hPX = (((v.goDimensions.h+bottomAdjust) * count)/2) - (v.goDimensions.h+(bottomAdjust*Math.floor(count/2)));
+                } else {
+                    wPX = 0;
+                    hPX = (((v.goDimensions.h+bottomAdjust) * (count+1))/2) - (v.goDimensions.h+(bottomAdjust*Math.floor(count/2)));
+                }
+            }
+            v.disableTransitions(termNode);
+        });
+        terms.forEach(function(termNode) {
+            // Move each terminal into position
+            if (termNode.id == prefix+'term' + currentTerm) { // Apply to current terminal...  Not the one we're switching to
+                v.applyTransform(termNode, 'translate(-' + wPX + 'px, -' + hPX + 'px)');
+            } else {
+                v.applyTransform(termNode, 'translate(-' + wPX + 'px, -' + hPX + 'px) scale(0.5)');
+            }
+            termNode.style.display = null; // Reset to visible
+        });
+    },
     toggleGridView: function(/*optional*/goBack) {
         // Brings up the terminal grid view or returns to full-size
         // If *goBack* is false, don't bother switching back to the previously-selected terminal
         var u = go.Utils,
             v = go.Visual,
             prefix = go.prefs.prefix,
+            currentTerm = localStorage[prefix+'selectedTerminal'],
+            currentTermObj = u.getNode('#'+prefix+'term'+currentTerm),
             controlsContainer = u.getNode('#'+prefix+'controlsContainer'),
             terms = u.toArray(u.getNodes(go.prefs.goDiv + ' .terminal'));
         if (goBack == null) {
@@ -3165,7 +3327,8 @@ GateOne.Base.update(GateOne.Visual, {
             });
             u.getNode(go.prefs.goDiv).style.overflow = 'hidden';
             if (goBack) {
-                go.Terminal.switchTerminal(localStorage[prefix+'selectedTerminal']); // Slide to the intended terminal
+                v.noReset = true; // Make sure slideToTerm doesn't reset the grid before applying transitions
+                go.Terminal.switchTerminal(localStorage[prefix+'selectedTerminal']); // Return to where we were before
             }
             if (controlsContainer) {
                 u.showElement(controlsContainer);
@@ -3182,64 +3345,72 @@ GateOne.Base.update(GateOne.Visual, {
                 u.hideElement(controlsContainer);
             }
             v.disableScrollback();
-            v.applyTransform(terms, 'translate(0px, 0px)');
-            var odd = true,
-                count = 1,
-                oddAmount = 0,
-                evenAmount = 0,
-                transform = "";
-            terms.forEach(function(termObj) {
-                var termID = termObj.id.split(prefix+'term')[1],
-                    pastearea = go.terminals[termID]['pasteNode'],
-                    selectTermFunc = function(e) {
-                        var termPre = GateOne.terminals[termID]['node'];
-                        localStorage[prefix+'selectedTerminal'] = termID;
-                        v.toggleGridView(false);
-                        go.Terminal.switchTerminal(termID);
-                        u.scrollToBottom(termPre);
-                    }
-                if (odd) {
-                    if (count == 1) {
-                        oddAmount = 50;
+            v.resetGrid();
+            setTimeout(function() {
+                terms.forEach(function(termObj) {
+                    termObj.style.display = null; // Make sure they're all visible
+                    v.enableTransitions(termObj);
+                });
+                v.applyTransform(terms, 'translate(0px, 0px)');
+                var odd = true,
+                    count = 1,
+                    oddAmount = 0,
+                    evenAmount = 0,
+                    transform = "";
+                terms.forEach(function(termObj) {
+                    var termID = termObj.id.split(prefix+'term')[1],
+                        pastearea = go.terminals[termID]['pasteNode'],
+                        selectTermFunc = function(e) {
+                            var termPre = GateOne.terminals[termID]['node'];
+                            localStorage[prefix+'selectedTerminal'] = termID;
+                            v.toggleGridView(false);
+                            v.noReset = true; // Make sure slideToTerm doesn't reset the grid before applying transitions
+                            go.Terminal.switchTerminal(termID);
+                            u.scrollToBottom(termPre);
+                        }
+                    if (odd) {
+                        if (count == 1) {
+                            oddAmount = 50;
+                        } else {
+                            oddAmount += 100;
+                        }
+                        transform = "scale(0.5, 0.5) translate(-50%, -" + oddAmount + "%)";
+                        v.applyTransform(termObj, transform);
+                        odd = false;
                     } else {
-                        oddAmount += 100;
+                        if (count == 2) {
+                            evenAmount = 50;
+                        } else {
+                            evenAmount += 100;
+                        }
+                        transform = "scale(0.5, 0.5) translate(-150%, -" + evenAmount + "%)";
+                        v.applyTransform(termObj, transform);
+                        odd = true;
                     }
-                    transform = "scale(0.5, 0.5) translate(-50%, -" + oddAmount + "%)";
-                    v.applyTransform(termObj, transform);
-                    odd = false;
-                } else {
-                    if (count == 2) {
-                        evenAmount = 50;
-                    } else {
-                        evenAmount += 100;
+                    count += 1;
+                    termObj.onclick = selectTermFunc;
+                    termObj.onmouseover = function(e) {
+                        var displayText = termObj.id.split(prefix+'term')[1] + ": " + termObj.title,
+                            termInfoDiv = u.createElement('div', {'id': 'terminfo'}),
+                            marginFix = Math.round(termObj.title.length/2),
+                            infoContainer = u.createElement('div', {'id': 'infocontainer', 'style': {'margin-right': '-' + marginFix + 'em'}});
+                        if (u.getNode('#'+prefix+'infocontainer')) { u.removeElement('#'+prefix+'infocontainer') }
+                        termInfoDiv.innerHTML = displayText;
+                        infoContainer.appendChild(termInfoDiv);
+                        v.applyTransform(infoContainer, 'scale(2)');
+                        termObj.appendChild(infoContainer);
+                        setTimeout(function() {
+                            infoContainer.style.opacity = 0;
+                        }, 1000);
                     }
-                    transform = "scale(0.5, 0.5) translate(-150%, -" + evenAmount + "%)";
-                    v.applyTransform(termObj, transform);
-                    odd = true;
-                }
-                count += 1;
-                termObj.onclick = selectTermFunc;
-                termObj.onmouseover = function(e) {
-                    var displayText = termObj.id.split(prefix+'term')[1] + ": " + termObj.title,
-                        termInfoDiv = u.createElement('div', {'id': 'terminfo'}),
-                        marginFix = Math.round(termObj.title.length/2),
-                        infoContainer = u.createElement('div', {'id': 'infocontainer', 'style': {'margin-right': '-' + marginFix + 'em'}});
-                    if (u.getNode('#'+prefix+'infocontainer')) { u.removeElement('#'+prefix+'infocontainer') }
-                    termInfoDiv.innerHTML = displayText;
-                    infoContainer.appendChild(termInfoDiv);
-                    v.applyTransform(infoContainer, 'scale(2)');
-                    termObj.appendChild(infoContainer);
-                    setTimeout(function() {
-                        infoContainer.style.opacity = 0;
-                    }, 1000);
-                }
-                if (pastearea) {
-                    // Wrapped in a timeout to ensure it gets called after other events that might make it reappear (e.g. goDiv.onmousedown)
-                    setTimeout(function() {
-                        u.hideElement(pastearea);
-                    }, 250);
-                }
-            });
+                    if (pastearea) {
+                        // Wrapped in a timeout to ensure it gets called after other events that might make it reappear (e.g. goDiv.onmousedown)
+                        setTimeout(function() {
+                            u.hideElement(pastearea);
+                        }, 250);
+                    }
+                });
+            }, 1);
         }
     },
     addSquare: function(squareName) {
@@ -4020,6 +4191,9 @@ go.Base.update(GateOne.Terminal, {
         goDiv.appendChild(tempPaste);
         tempPaste.focus();
         // Since we're not calling preventDefault() on this event, by shifting focus to the pastearea (which is a textarea) the browser will execute the regular shift-Inert event (which is pasting =)
+//         setTimeout(function() {
+//             u.getNode(go.prefs.goDiv).contentEditable = false;
+//         }, 100);
     },
     timeoutAction: function() {
         // Write a message to the screen indicating a timeout has occurred and close the WebSocket
@@ -4102,13 +4276,15 @@ go.Base.update(GateOne.Terminal, {
                 if (existingScreen && GateOne.terminals[term]['screen'].length != screen.length) {
                     // Resized
                     GateOne.terminals[term]['screen'].length = screen.length; // Resize the array to match
-                    existingScreen.innerHTML = "";
                     for (var i=0; i < screen.length; i++) {
-                        var lineSpan = u.createElement('span', {'class': prefix + 'line_' + i});
-                        lineSpan.innerHTML = screen[i] + '\n';
-                        existingScreen.appendChild(lineSpan);
-                        // Update the existing screen array in-place to cut down on GC
-                        GateOne.terminals[term]['screen'][i] = screen[i];
+                        var existingLine = existingPre.querySelector(GateOne.prefs.goDiv + ' .' + prefix + 'line_' + i),
+                            lineSpan = u.createElement('span', {'class': prefix + 'line_' + i});
+                        if (!existingLine) {
+                            lineSpan.innerHTML = screen[i] + '\n';
+                            existingScreen.appendChild(lineSpan);
+                            // Update the existing screen array in-place to cut down on GC
+                            GateOne.terminals[term]['screen'][i] = screen[i];
+                        }
                     }
                 }
                 if (existingScreen) { // Update the terminal display
@@ -4141,16 +4317,34 @@ go.Base.update(GateOne.Terminal, {
                         } else {
                             if (!go.prefs.embedded) {
                                 // In embedded mode this kind of adjustment can be unreliable
-                                var distance = goDiv.clientHeight - termPre.offsetHeight;
-                                GateOne.terminals[term]['heightAdjust'] = 0;
-                                if (!GateOne.prefs.embedded) { // When embedding the code below can end up hiding terminals.
-                                    // Feel free to put something like this in updateTermCallbacks if you want.
-                                    if (GateOne.Utils.isVisible(termPre)) {
-                                        transform = "translateY(-" + distance + "px)";
-                                        GateOne.Visual.applyTransform(termPre, transform); // Move it to the top so the scrollback isn't visible unless you actually scroll
-                                    }
+                                GateOne.Visual.applyTransform(termPre, ''); // Need to reset before we do the calculation
+                                var distance = goDiv.clientHeight - screenSpan.offsetHeight;
+                                GateOne.terminals[term]['heightAdjust'] = 0; // Have to set this as a default value for new terminals
+                                // Feel free to put something like this in updateTermCallbacks if you want.
+                                if (GateOne.Utils.isVisible(termPre)) {
+                                    var transform = "translateY(-" + distance + "px)";
+                                    GateOne.Visual.applyTransform(termPre, transform); // Move it to the top so the scrollback isn't visible unless you actually scroll
                                 }
                             }
+                        }
+                        termPre.oncopy = function(e) {
+                            // Convert to plaintext before copying
+                            // NOTE: This doesn't work in Firefox.  In fact, in Firefox it makes it impossible to copy anything!
+                            if (navigator.userAgent.indexOf('Firefox') != -1) {
+                                return true; // Firefox doesn't appear to copy formatting anyway so right now this isn't necessary
+                            }
+                            var text = u.rtrim(u.getSelText()),
+                                selection = window.getSelection(),
+                                tempTextArea = u.createElement('textarea', {'style': {'left': '-999999px', 'top': '-999999px'}});
+                            tempTextArea.value = text;
+                            document.body.appendChild(tempTextArea);
+                            tempTextArea.select();
+                            setTimeout(function() {
+                                // Get rid of it once the copy operation is complete
+                                u.removeElement(tempTextArea);
+                                GateOne.Input.capture(); // Re-focus on the terminal and start accepting keyboard input again
+                            }, 100);
+                            return true;
                         }
                         GateOne.terminals[term]['node'] = termPre; // For faster access
                     }
@@ -4427,7 +4621,7 @@ go.Base.update(GateOne.Terminal, {
             go.terminals[term]['scrollback'] = blankLines;
         }
         if (!go.prefs.embedded) {
-            // Add the terminal div to the grid
+            // Prepare the terminal div for the grid
             terminal = u.createElement('div', {'id': currentTerm, 'title': 'Gate One', 'class': 'terminal', 'style': {'width': go.Visual.goDimensions.w + 'px', 'height': go.Visual.goDimensions.h + 'px'}});
         } else {
             terminal = u.createElement('div', {'id': currentTerm, 'title': 'Gate One', 'class': 'terminal'});
@@ -4604,10 +4798,10 @@ go.Base.update(GateOne.Terminal, {
     switchTerminal: function(term) {
         // Calls GateOne.Net.setTerminal(*term*) then calls whatever function is assigned to GateOne.Terminal.termSelectCallback(*term*) (default is GateOne.Visual.slideToTerm())
         // So if you want to write your own animation/function for switching terminals you can make it happen by simply assigning your function to GateOne.Terminal.termSelectCallback
-        go.Net.setTerminal(term);
         if (go.Terminal.termSelectCallback) {
             go.Terminal.termSelectCallback(term);
         }
+        go.Net.setTerminal(term);
     },
     reconnectTerminalAction: function(term) {
         // Called when the server reports that the terminal number supplied via 'new_terminal' already exists
