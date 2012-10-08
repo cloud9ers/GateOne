@@ -776,7 +776,7 @@ class MainHandler(BaseHandler):
         if autoConnectURL:
             autoConnectURL = autoConnectURL[0]
             if js_init:
-                js_init = js_init[:-1] + ', autoConnectURL:"%s"}'
+                js_init = js_init[:-1] + ', autoConnectURL:"%s"}' % autoConnectURL
             else:
                 js_init = u'{autoConnectURL:"%s"}' % autoConnectURL
 
