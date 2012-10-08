@@ -220,6 +220,7 @@ def openssh_connect(
     If *additional_args* is given this value (or values if it is a list) will be
     added to the arguments passed to the ssh command.
     """
+    host = "127.0.0.1" # Only local connections are allowed
     try:
         int(port)
     except ValueError:
@@ -409,6 +410,7 @@ def telnet_connect(user, host, port=23, env=None):
 
     .. note:: Some telnet servers don't support sending the username in the connection.  In these cases it will simply ask for it after the connection is established.
     """
+    host = "127.0.0.1" # Only local connections are allowed
     try:
         int(port)
     except ValueError:

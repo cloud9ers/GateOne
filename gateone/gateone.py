@@ -772,6 +772,14 @@ class MainHandler(BaseHandler):
         minified_js_abspath = os.path.join(
             minified_js_abspath, 'gateone.min.js')
         js_init = self.settings['js_init']
+        autoConnectURL = self.get_arguments("autoConnectURL")
+        if autoConnectURL:
+            autoConnectURL = autoConnectURL[0]
+            if js_init:
+                js_init = js_init[:-1] + ', autoConnectURL:"%s"}'
+            else:
+                js_init = u'{autoConnectURL:"%s"}' % autoConnectURL
+
         # Use the minified version if it exists
         if os.path.exists(minified_js_abspath):
             gateone_js = "%sstatic/gateone.min.js" % self.settings['url_prefix']
