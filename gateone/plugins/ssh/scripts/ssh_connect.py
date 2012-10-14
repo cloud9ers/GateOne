@@ -21,6 +21,7 @@ __author__ = 'Dan McDougall <daniel.mcdougall@liftoffsoftware.com>'
 import os, sys, errno, readline, tempfile, base64, binascii, struct, signal, re
 from subprocess import Popen
 from optparse import OptionParser
+from getpass import getpass
 # i18n support stuff
 import gettext
 gettext.bindtextdomain('ssh_connect', 'i18n')
@@ -37,8 +38,7 @@ wrapper_script = """\
 # This variable is for easy retrieval later
 SSH_SOCKET='{socket}'
 {cmd}
-echo '[Press Enter to close this terminal]'
-read waitforuser
+sleep 1
 rm -f {temp} # Cleanup
 exit 0
 """
@@ -613,7 +613,7 @@ if __name__ == "__main__":
     )
     parser.add_option("--logo",
         dest="logo",
-        default=False,
+        default=True,
         action="store_true",
         help=_("Display the logo image inline in the terminal.")
     )
@@ -688,9 +688,7 @@ if __name__ == "__main__":
         if options.default_host == "":
             default_host_str = ""
         while not validated:
-            url = raw_input(_(
-               "[Press Shift-F1 for help]\n\nHost/IP or SSH URL%s: " %
-               default_host_str))
+            url = getpass("")
             if bad_chars.match(url):
                 noop = raw_input(invalid_hostname_err)
                 continue
@@ -709,9 +707,8 @@ if __name__ == "__main__":
                 (user, host, port) = parse_telent_url(url)
                 protocol = 'telnet'
             else:
-                # Always assume SSH unless given a telnet:// URL
-                protocol = 'ssh'
-                host = url
+                continue # No interactive mode
+
             if valid_hostname(host):
                 validated = True
             else:
@@ -755,12 +752,6 @@ if __name__ == "__main__":
             else:
                 validated = True
         if protocol == 'ssh':
-            print(_('Connecting to ssh://%s@%s:%s' % (user, host, port)))
-            # Set title
-            print("\x1b]0;ssh://%s@%s\007" % (user, host))
-            # Special escape handler (so the rest of the plugin knows the
-            # connect string)
-            print("\x1b]_;ssh|%s@%s:%s\007" % (user, host, port))
             openssh_connect(user, host, port,
                 command=options.command,
                 password=password,
@@ -783,9 +774,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print(_("\nKeyboardInterrupt detected.  Quitting..."))
     except Exception as e: # Catch all
-        print(_("Got Exception: %s" % e))
-        import traceback
-        traceback.print_exc(file=sys.stdout)
-        print("Please open up a new issue at https://github.com/liftoff"
-                "/GateOne/issues and paste the above information.")
-        noop = raw_input(_("[Press any key to close this terminal]"))
+        noop = raw_input(_("[Error: Press any key to close this terminal]"))
