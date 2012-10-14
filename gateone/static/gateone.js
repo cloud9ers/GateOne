@@ -586,7 +586,9 @@ var go = GateOne.Base.update(GateOne, {
             // In case the user changed the rows/cols or the font/size changed:
             setTimeout(function() { // Wrapped in a timeout since it takes a moment for everything to change in the browser
                 go.Visual.updateDimensions();
-                go.Net.sendDimensions();
+                for (var term in GateOne.terminals) {
+                    go.Net.sendDimensions(term);
+                };
             }, 3000);
         }
         // Apply user-specified dimension styles and settings
@@ -694,7 +696,9 @@ var go = GateOne.Base.update(GateOne, {
                     emHeight = u.getEmDimensions(goDiv).h;
                 if (goDiv.style.display != "none") {
                     go.Visual.updateDimensions();
-                    go.Net.sendDimensions();
+                    for (term in GateOne.terminals) {
+                        go.Net.sendDimensions(term);
+                    };
                 }
                 // Adjust the view so the scrollback buffer stays hidden unless the user scrolls
                 if (!go.prefs.embedded) {
@@ -703,12 +707,21 @@ var go = GateOne.Base.update(GateOne, {
                     go.resizeAdjustTimer = setTimeout(function() {
                         var distance = goDiv.clientHeight - screenNode.offsetHeight;
                         distance -= (emHeight * go.prefs.rowAdjust); // Have to adjust for the extra row we add for the playback controls
-                        if (GateOne.Utils.isVisible(termPre)) {
+                        if (go.Utils.isVisible(termPre)) {
                             var transform = "translateY(-" + distance + "px)";
-                            GateOne.Visual.applyTransform(termPre, transform); // Move it to the top so the scrollback isn't visible unless you actually scroll
+                            go.Visual.applyTransform(termPre, transform); // Move it to the top so the scrollback isn't visible unless you actually scroll
                         }
                     }, 500);
                 }
+                if (go.prefs.rows) { // If someone explicitly set rows/cols, scale the term to fit the screen
+                    var nodeHeight = screenNode.getClientRects()[0].top;
+                    if (nodeHeight < goDiv.clientHeight) { // Resize to fit
+                        var scale = goDiv.clientHeight / (goDiv.clientHeight - nodeHeight),
+                            transform = "scale(" + scale + ", " + scale + ")";
+                        go.Visual.applyTransform(termPre, transform);
+                    }
+                }
+                u.scrollToBottom(termPre);
             }, 750);
         }
         window.onresize = onResizeEvent;
@@ -1029,6 +1042,7 @@ GateOne.Base.update(GateOne.Utils, {
             lineCounter = 0;
         // We need two lines so we can factor in the line height and character spacing (if it has been messed with).
         sizingDiv.className = "terminal";
+        sizingDiv.style.wordWrap = 'normal';
         for (var i=0; i <= 63; i++) {
             fillerX += "\u2588"; // Fill it with a single character (this is a unicode "full block": █).  Using the \u syntax because minifiers don't seem to like unicode characters to be in the source as-is.
         }
@@ -1330,6 +1344,31 @@ GateOne.Base.update(GateOne.Utils, {
         }
         http.send(null); // All done
     },
+    getCookie: function(name) {
+        /**:GateOne.Utils.getCookie(name)
+
+            Returns the cookie of the given *name*
+        */
+        var i,x,y,ARRcookies=document.cookie.split(";");
+        for (i=0;i<ARRcookies.length;i++) {
+            x=ARRcookies[i].substr(0,ARRcookies[i].indexOf("="));
+            y=ARRcookies[i].substr(ARRcookies[i].indexOf("=")+1);
+            x=x.replace(/^\s+|\s+$/g,"");
+            if (x==name) {
+                return unescape(y);
+            }
+        }
+    },
+    setCookie: function(name, value, days) {
+        /**:GateOne.Utils.setCookie(name, value, days)
+
+            Sets the cookie of the given *name* to the given *value* with the given number of expiration *days*.
+        */
+        var exdate=new Date();
+        exdate.setDate(exdate.getDate() + days);
+        var c_value=escape(value) + ((days==null) ? "" : "; expires=" + exdate.toUTCString());
+        document.cookie=name + "=" + c_value;
+    },
     deleteCookie: function(name, path, domain) {
         document.cookie = name + "=" + ((path) ? ";path=" + path : "") + ((domain) ? ";domain=" + domain : "") + ";expires=Thu, 01-Jan-1970 00:00:01 GMT";
     },
@@ -1462,6 +1501,27 @@ GateOne.Base.update(GateOne.Utils, {
             return GateOne.Utils.isVisible(node.parentElement);
         } else {
             return true;
+        }
+    },
+    humanReadableBytes: function(bytes, /*opt*/precision) {
+        // Returns *bytes* as a human-readable string in a similar fashion to how it would be displayed by 'ls -lh' or 'df -h'.
+        // If *precision* (integer) is given, it will be used to determine the number of decimal points to use when rounding.  Otherwise it will default to 0
+        var sizes = ['', 'K', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y'],
+            postfix = 0;
+        bytes = parseInt(bytes); // Just in case we get passed *bytes* as a string
+        if (!precision) {
+            precision = 0;
+        }
+        if (bytes == 0) return 'n/a';
+        if (bytes > 1024) {
+            while( bytes >= 1024 ) {
+                postfix++;
+                bytes = bytes / 1024;
+            }
+            return bytes.toFixed(precision) + sizes[postfix];
+        } else {
+            // Just return the bytes as-is (as a string)
+            return bytes + "";
         }
     }
 });
@@ -1680,7 +1740,15 @@ GateOne.Base.update(GateOne.Net, {
                 }
                 if (!go.prefs.auth) {
                     // If 'auth' isn't set that means we're not in API mode but we could still be embedded so check for the user's session info in localStorage
-                    if (localStorage[prefix+'gateone_user']) {
+                    var goCookie = u.getCookie('gateone_user');
+                    if (goCookie) {
+                        // Prefer the cookie
+                        if (goCookie[0] == '"') {
+                            goCookie = eval(goCookie); // Wraped in quotes; this removes them
+                        }
+                        go.prefs.auth = goCookie;
+                        settings['auth'] = go.prefs.auth;
+                    } else if (localStorage[prefix+'gateone_user']) {
                         go.prefs.auth = localStorage[prefix+'gateone_user'];
                         settings['auth'] = go.prefs.auth;
                     }
@@ -1708,7 +1776,7 @@ GateOne.Base.update(GateOne.Net, {
                 msg = '<b>Message From Gate One Server:</b> ' + evt.data;
             if (noticeContainer) {
                 // This only works if Gate One loaded successfuly
-                v.displayMessage(msg, 5000, 5000);
+                v.displayMessage(msg, 10000); // Give it plenty of time
             } else {
                 // Fallback to this:
                 var msgContainer = u.createElement('div', {'id': 'noticecontainer', 'style': {'font-size': '1.5em', 'background-color': '#000', 'color': '#fff', 'display': 'block', 'position': 'fixed', 'bottom': '1em', 'right': '2em', 'left': '2em', 'z-index': 9999}}); // Have to use 'style' since CSS may not have been loaded
@@ -1716,7 +1784,7 @@ GateOne.Base.update(GateOne.Net, {
                 document.body.appendChild(msgContainer);
                 setTimeout(function() {
                     u.removeElement(msgContainer);
-                }, 5000);
+                }, 10000);
             }
         }
         // Execute each respective action
@@ -1762,6 +1830,80 @@ GateOne.Input.shortcuts = {}; // Shortcuts added via registerShortcut() wind up 
 // 'KEY_N': [{'modifiers': {'ctrl': true, 'alt': true, 'meta': false, 'shift': false}, 'action': 'GateOne.Terminal.newTerminal()'}]
 GateOne.Base.update(GateOne.Input, {
     // GateOne.Input is in charge of all keyboard input as well as copy & paste stuff
+    onMouseDown: function(e) {
+        // TODO: Add a shift-click context menu for special operations.  Why shift and not ctrl-click or alt-click?  Some platforms use ctrl-click to emulate right-click and some platforms use alt-click to move windows around.
+        logDebug("goDiv.onmousedown() button: " + e.button + ", which: " + e.which);
+        var go = GateOne,
+            u = go.Utils,
+            prefix = go.prefs.prefix,
+            goDiv = u.getNode(go.prefs.goDiv),
+            m = go.Input.mouse(e),
+            selectedTerm = localStorage[prefix+'selectedTerminal'],
+            selectedPastearea = go.terminals[selectedTerm]['pasteNode'],
+            selectedText = u.getSelText();
+        go.Input.mouseDown = true;
+        // This is kinda neat:  By setting "contentEditable = true" we can right-click to paste.
+        // However, we only want this when the user is actually bringing up the context menu because
+        // having it enabled slows down screen updates by a non-trivial amount.
+        if (m.button.middle) {
+            u.showElement(selectedPastearea);
+            selectedPastearea.focus();
+            if (selectedText.length) {
+                go.Input.handlingPaste = true; // We're emulating a paste so we might as well act like one
+                // Only preventDefault if text is selected so we don't muck up X11-style middle-click pasting
+                e.preventDefault();
+                go.Input.queue(selectedText);
+                go.Net.sendChars();
+                setTimeout(function() {
+                    go.Input.handlingPaste = false;
+                }, 250);
+            }
+        } else if (m.button.right) {
+            if (!selectedText.length) {
+                // Redisplay the pastearea so we can get a proper context menu in case the user wants to paste
+                // NOTE: On Firefox this behavior is broken.  See: https://bugzilla.mozilla.org/show_bug.cgi?id=785773
+                u.showElement(selectedPastearea);
+                selectedPastearea.focus();
+            } else {
+                goDiv.focus();
+            }
+        } else {
+            goDiv.focus();
+        }
+    },
+    onMouseUp: function(e) {
+        var go = GateOne,
+            u = go.Utils,
+            prefix = go.prefs.prefix,
+            selectedTerm = localStorage[prefix+'selectedTerminal'],
+            selectedPastearea = go.terminals[selectedTerm]['pasteNode'],
+            goDiv = u.getNode(go.prefs.goDiv),
+            selectedText = u.getSelText();
+        logDebug("goDiv.onmouseup: e.button: " + e.button + ", e.which: " + e.which);
+        // Once the user is done pasting (or clicking), set it back to false for speed
+//             goDiv.contentEditable = false; // Having this as false makes screen updates faster
+        go.Input.mouseDown = false;
+        if (selectedText) {
+            // Don't show the pastearea as it will prevent the user from right-clicking to copy.
+            return;
+        }
+        if (document.activeElement.tagName == "INPUT" || document.activeElement.tagName == "TEXTAREA" || document.activeElement.tagName == "SELECT" || document.activeElement.tagName == "BUTTON") {
+            return; // Don't do anything if the user is editing text in an input/textarea or is using a select element (so the up/down arrows work)
+        }
+        if (!go.Visual.gridView) {
+            setTimeout(function() {
+                if (!u.getSelText()) {
+                    u.showElement(selectedPastearea);
+                }
+            }, 750); // NOTE: For this to work (to allow users to double-click-to-highlight a word) they must double-click before this timer fires.
+        }
+        // If the Firefox bug timer hasn't fired by now it wasn't a click-and-drag event
+        if (go.Input.firefoxBugTimer) {
+            clearTimeout(go.Input.firefoxBugTimer);
+            go.Input.firefoxBugTimer = null;
+        }
+        goDiv.focus();
+    },
     capture: function() {
         // Returns focus to goDiv and ensures that it is capturing onkeydown events properly
         logDebug('capture()');
@@ -1773,125 +1915,13 @@ GateOne.Base.update(GateOne.Input, {
         goDiv.onkeydown = go.Input.onKeyDown;
         goDiv.onkeyup = go.Input.onKeyUp; // Only used to emulate the meta key modifier (if necessary)
         goDiv.onkeypress = go.Input.emulateKeyFallback;
-        // NOTE: This might not be necessary anymore with the pastearea:
-        var onPaste = function(e) {
-            logDebug("goDiv registered paste event.");
-            if (document.activeElement.tagName == "INPUT" || document.activeElement.tagName == "TEXTAREA" || document.activeElement.tagName == "SELECT" || document.activeElement.tagName == "BUTTON") {
-                return; // Don't do anything if the user is editing text in an input/textarea or is using a select element (so the up/down arrows work)
-            }
-            if (!go.Input.handlingPaste) {
-                // Grab the text being pasted
-                go.Input.handlingPaste = true;
-                var contents = null;
-                if (e.clipboardData) {
-                    // Don't actually paste the text where the user clicked
-                    e.preventDefault();
-                    if (/text\/html/.test(e.clipboardData.types)) {
-                        contents = e.clipboardData.getData('text/html');
-                        contents = u.stripHTML(contents); // Convert to plain text to avoid unwanted cruft
-                    }
-                    else if (/text\/plain/.test(e.clipboardData.types)) {
-                        contents = e.clipboardData.getData('text/plain');
-                    }
-                    logDebug('paste contents: ' + contents);
-                    // Queue it up and send the characters as if we typed them in
-                    go.Input.queue(contents);
-                    go.Net.sendChars();
-                } else {
-                    // Change focus to the current pastearea and hope for the best
-                    go.Terminal.paste();
-                }
-                // This is wrapped in a timeout so that the paste events that bubble up after the first get ignored
-                setTimeout(function() {
-                    go.Input.handlingPaste = false;
-                }, 250);
-            } else {
-                e.preventDefault(); // Prevent any funny business around queuing up pastes
-            }
-        }
-        goDiv.onpaste = onPaste;
+        goDiv.onpaste = go.Input.onPaste;
         goDiv.oncopy = function(e) {
             // After the copy we need to bring the pastearea back up so the context menu will work to paste again
             u.showElements('.pastearea');
         }
-        goDiv.onmousedown = function(e) {
-            // TODO: Add a shift-click context menu for special operations.  Why shift and not ctrl-click or alt-click?  Some platforms use ctrl-click to emulate right-click and some platforms use alt-click to move windows around.
-            logDebug("goDiv.onmousedown() button: " + e.button + ", which: " + e.which);
-            var m = go.Input.mouse(e),
-                selectedTerm = localStorage[prefix+'selectedTerminal'],
-                selectedPastearea = go.terminals[selectedTerm]['pasteNode'],
-                selectedText = u.getSelText();
-            go.Input.mouseDown = true;
-            // This is kinda neat:  By setting "contentEditable = true" we can right-click to paste.
-            // However, we only want this when the user is actually bringing up the context menu because
-            // having it enabled slows down screen updates by a non-trivial amount.
-            if (m.button.middle) {
-                u.showElement(selectedPastearea);
-                selectedPastearea.focus();
-                if (selectedText.length) {
-                    go.Input.handlingPaste = true; // We're emulating a paste so we might as well act like one
-                    // Only preventDefault if text is selected so we don't muck up X11-style middle-click pasting
-                    e.preventDefault();
-                    go.Input.queue(selectedText);
-                    go.Net.sendChars();
-                    setTimeout(function() {
-                        go.Input.handlingPaste = false;
-                    }, 250);
-                }
-            } else if (m.button.right) {
-                if (!selectedText.length) {
-                    // Redisplay the pastearea so we can get a proper context menu in case the user wants to paste
-                    // NOTE: On Firefox this behavior is broken.  See: https://bugzilla.mozilla.org/show_bug.cgi?id=785773
-                    u.showElement(selectedPastearea);
-                    selectedPastearea.focus();
-                } else {
-                    goDiv.focus();
-                }
-            } else {
-                if (navigator.userAgent.indexOf('Firefox') != -1) {
-                    if (go.Input.firefoxBugTimer) {
-                        clearTimeout(go.Input.firefoxBugTimer);
-                        go.Input.firefoxBugTimer = null;
-                    }
-                    go.Input.firefoxBugTimer = setTimeout(function() {
-                        if (!u.getSelText().length) {
-                            go.Visual.displayMessage("NOTE: Having trouble selecting text in Firefox?  It's a browser bug!  <br>WORKAROUND: Double-click something <i>then</i> you should be able to highlight whatever you want.", 5000, 10000);
-                            go.Visual.displayMessage("Please click <a href='https://bugzilla.mozilla.org/show_bug.cgi?id=785773'>here</a> to vote and comment on the problem so we can get it fixed.", 5000, 10000);
-                            logInfo("If the Firefox devs fixed the following bug you wouldn't see this message!");
-                            logInfo("https://bugzilla.mozilla.org/show_bug.cgi?id=785773 <--Vote for it.  The squeaky wheel gets the oil.");
-                        }
-                    }, 500);
-                }
-                goDiv.focus();
-            }
-        }
-        goDiv.onmouseup = function(e) {
-            logDebug("goDiv.onmouseup: e.button: " + e.button + ", e.which: " + e.which);
-            // Once the user is done pasting (or clicking), set it back to false for speed
-//             goDiv.contentEditable = false; // Having this as false makes screen updates faster
-            go.Input.mouseDown = false;
-            var selectedText = u.getSelText();
-            if (selectedText) {
-                // Don't show the pastearea as it will prevent the user from right-clicking to copy.
-                return;
-            }
-            if (document.activeElement.tagName == "INPUT" || document.activeElement.tagName == "TEXTAREA" || document.activeElement.tagName == "SELECT" || document.activeElement.tagName == "BUTTON") {
-                return; // Don't do anything if the user is editing text in an input/textarea or is using a select element (so the up/down arrows work)
-            }
-            if (!go.Visual.gridView) {
-                setTimeout(function() {
-                    if (!u.getSelText()) {
-                        u.showElements('.pastearea');
-                    }
-                }, 750); // NOTE: For this to work (to allow users to double-click-to-highlight a word) they must double-click before this timer fires.
-            }
-            // If the Firefox bug timer hasn't fired by now it wasn't a click-and-drag event
-            if (go.Input.firefoxBugTimer) {
-                clearTimeout(go.Input.firefoxBugTimer);
-                go.Input.firefoxBugTimer = null;
-            }
-            goDiv.focus();
-        }
+        goDiv.onmousedown = go.Input.onMouseDown;
+        goDiv.onmouseup = go.Input.onMouseUp;
         if (go.Input.overlayTimer) {
             clearTimeout(go.Input.overlayTimer);
             go.Input.overlayTimer = null;
@@ -1934,6 +1964,45 @@ GateOne.Base.update(GateOne.Input, {
         if (!go.Visual.overlay) {
             // The timer here is to prevent the screen from flashing whenever something is pasted.
             go.Input.overlayTimer = setTimeout(go.Visual.toggleOverlay, 250);
+        }
+    },
+    onPaste: function(e) {
+        var go = GateOne,
+            u = go.Utils,
+            prefix = go.prefs.prefix,
+            goDiv = u.getNode(go.prefs.goDiv);
+        logDebug("goDiv registered paste event.");
+        if (document.activeElement.tagName == "INPUT" || document.activeElement.tagName == "TEXTAREA" || document.activeElement.tagName == "SELECT" || document.activeElement.tagName == "BUTTON") {
+            return; // Don't do anything if the user is editing text in an input/textarea or is using a select element (so the up/down arrows work)
+        }
+        if (!go.Input.handlingPaste) {
+            // Grab the text being pasted
+            go.Input.handlingPaste = true;
+            var contents = null;
+            if (e.clipboardData) {
+                // Don't actually paste the text where the user clicked
+                e.preventDefault();
+                if (/text\/html/.test(e.clipboardData.types)) {
+                    contents = e.clipboardData.getData('text/html');
+                    contents = u.stripHTML(contents); // Convert to plain text to avoid unwanted cruft
+                }
+                else if (/text\/plain/.test(e.clipboardData.types)) {
+                    contents = e.clipboardData.getData('text/plain');
+                }
+                logDebug('paste contents: ' + contents);
+                // Queue it up and send the characters as if we typed them in
+                go.Input.queue(contents);
+                go.Net.sendChars();
+            } else {
+                // Change focus to the current pastearea and hope for the best
+                go.Terminal.paste();
+            }
+            // This is wrapped in a timeout so that the paste events that bubble up after the first get ignored
+            setTimeout(function() {
+                go.Input.handlingPaste = false;
+            }, 100);
+        } else {
+            e.preventDefault(); // Prevent any funny business around queuing up pastes
         }
     },
     queue: function(text) {
@@ -2368,6 +2437,10 @@ GateOne.Base.update(GateOne.Input, {
         if (key.string == "KEY_UNKNOWN") {
             return; // Without this, unknown keys end up sending a null character which isn't a good idea =)
         }
+        if (key.string != "KEY_SHIFT" && key.string != "KEY_CTRL" && key.string != "KEY_ALT" && key.string != "KEY_META") {
+            // Scroll to bottom (seems like a normal convention for when a key is pressed in a terminal)
+            u.scrollToBottom(go.terminals[term]['node']);
+        }
         // Try using the keyTable first (so everything can be overridden)
         if (key.string in goIn.keyTable) {
             if (goIn.keyTable[key.string]) { // Not null
@@ -2477,6 +2550,11 @@ GateOne.Base.update(GateOne.Input, {
                         }
                     }
                 }
+            } else if (key.string == 'KEY_V') {
+                // Macs need this to support pasting with ⌘-v (⌘-c doesn't need anything special)
+                var term = localStorage[go.prefs.prefix+'selectedTerminal'],
+                    pastearea = go.terminals[term]['pasteNode'];
+                pastearea.focus(); // So the browser will know to issue a paste event
             }
         }
         // Handle ctrl-alt-<key> and ctrl-alt-shift-<key> combos
@@ -2612,7 +2690,7 @@ GateOne.Base.update(GateOne.Visual, {
             toolbarGrid = u.createElement('div', {'id': go.prefs.prefix+'icon_grid', 'class': 'toolbar', 'title': "Grid View"}),
             toolbar = u.getNode('#'+go.prefs.prefix+'toolbar');
         // Add our grid icon to the icons list
-        GateOne.Icons['grid'] = '<svg xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://www.w3.org/2000/svg" height="18" width="18" version="1.1" xmlns:cc="http://creativecommons.org/ns#" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:dc="http://purl.org/dc/elements/1.1/"><defs><linearGradient id="linearGradient3002" y2="255.75" gradientUnits="userSpaceOnUse" x2="311.03" gradientTransform="matrix(0.70710678,0.70710678,-0.70710678,0.70710678,261.98407,-149.06549)" y1="227.75" x1="311.03"><stop class="stop1" offset="0"/><stop class="stop4" offset="1"/></linearGradient></defs><metadata><rdf:RDF><cc:Work rdf:about=""><dc:format>image/svg+xml</dc:format><dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/><dc:title/></cc:Work></rdf:RDF></metadata><g transform="matrix(0.66103562,-0.67114094,0.66103562,0.67114094,-611.1013,-118.18392)"><g fill="url(#linearGradient3002)" transform="translate(63.353214,322.07725)"><polygon points="311.03,255.22,304.94,249.13,311.03,243.03,317.13,249.13"/><polygon points="318.35,247.91,312.25,241.82,318.35,235.72,324.44,241.82"/><polygon points="303.52,247.71,297.42,241.61,303.52,235.52,309.61,241.61"/><polygon points="310.83,240.39,304.74,234.3,310.83,228.2,316.92,234.3"/></g></g></svg>';
+        GateOne.Icons['grid'] = '<svg xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://www.w3.org/2000/svg" height="18" width="18" version="1.1" xmlns:cc="http://creativecommons.org/ns#" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:dc="http://purl.org/dc/elements/1.1/"><defs><linearGradient id="gridGradient" y2="255.75" gradientUnits="userSpaceOnUse" x2="311.03" gradientTransform="matrix(0.70710678,0.70710678,-0.70710678,0.70710678,261.98407,-149.06549)" y1="227.75" x1="311.03"><stop class="stop1" offset="0"/><stop class="stop4" offset="1"/></linearGradient></defs><metadata><rdf:RDF><cc:Work rdf:about=""><dc:format>image/svg+xml</dc:format><dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/><dc:title/></cc:Work></rdf:RDF></metadata><g transform="matrix(0.66103562,-0.67114094,0.66103562,0.67114094,-611.1013,-118.18392)"><g fill="url(#gridGradient)" transform="translate(63.353214,322.07725)"><polygon points="311.03,255.22,304.94,249.13,311.03,243.03,317.13,249.13"/><polygon points="318.35,247.91,312.25,241.82,318.35,235.72,324.44,241.82"/><polygon points="303.52,247.71,297.42,241.61,303.52,235.52,309.61,241.61"/><polygon points="310.83,240.39,304.74,234.3,310.83,228.2,316.92,234.3"/></g></g></svg>';
         // Setup our toolbar icons and actions
         toolbarGrid.innerHTML = GateOne.Icons['grid'];
         var gridToggle = function() {
@@ -2828,16 +2906,16 @@ GateOne.Base.update(GateOne.Visual, {
             }, 1100);
         }
     },
-    // TODO: Get this *actually* centering the terminal title info
+    // TODO: Get this *actually* centering the terminal info
     displayTermInfo: function(term) {
         // Displays the given term's information as a psuedo tooltip that eventually fades away
         var u = go.Utils,
             v = go.Visual,
             prefix = go.prefs.prefix,
             termObj = u.getNode('#'+prefix+'term' + term),
-            displayText = termObj.id.split('term')[1] + ": " + termObj.title,
+            displayText = termObj.id.split('term')[1] + ": " + go.terminals[term]['title'],
             termInfoDiv = u.createElement('div', {'id': 'terminfo'}),
-            marginFix = Math.round(termObj.title.length/2),
+            marginFix = Math.round(go.terminals[term]['title'].length/2),
             infoContainer = u.createElement('div', {'id': 'infocontainer', 'style': {'margin-right': '-' + marginFix + 'em'}});
         termInfoDiv.innerHTML = displayText;
         if (u.getNode('#'+prefix+'infocontainer')) { u.removeElement('#'+prefix+'infocontainer') }
@@ -2849,6 +2927,9 @@ GateOne.Base.update(GateOne.Visual, {
         }
         v.infoTimer = setTimeout(function() {
             v.applyStyle(infoContainer, {'opacity': 0});
+            setTimeout(function() {
+                u.hideElement(infoContainer);
+            }, 1000);
         }, 1000);
     },
     displayMessage: function(message, /*opt*/timeout, /*opt*/removeTimeout, /*opt*/id) {
@@ -2864,11 +2945,24 @@ GateOne.Base.update(GateOne.Visual, {
             id = 'notice';
         }
         var u = go.Utils,
+            v = go.Visual,
             prefix = go.prefs.prefix,
             now = new Date(),
             timeDiff = now - go.Visual.sinceLastMessage,
             noticeContainer = u.getNode('#'+prefix+'noticecontainer'),
-            notice = u.createElement('div', {'id': prefix+id});
+            notice = u.createElement('div', {'id': prefix+id}),
+            messageSpan = u.createElement('span'),
+            closeX = u.createElement('span', {'class': 'close_notice'}),
+            unique = u.randomPrime(),
+            removeFunc = function(now) {
+                v.noticeTimers[unique] = setTimeout(function() {
+                    go.Visual.applyStyle(notice, {'opacity': 0});
+                    v.noticeTimers[unique] = setTimeout(function() {
+                        u.removeElement(notice);
+                        delete v.noticeTimers[unique];
+                    }, timeout+removeTimeout);
+                }, timeout);
+            }
         if (message == go.Visual.lastMessage) {
             // Only display messages every two seconds if they repeat so we don't spam the user.
             if (timeDiff < 2000) {
@@ -2881,16 +2975,33 @@ GateOne.Base.update(GateOne.Visual, {
         if (!removeTimeout) {
             removeTimeout = 5000;
         }
-        notice.innerHTML = message;
+        messageSpan.innerHTML = message;
+        closeX.innerHTML = go.Icons['close'].replace('closeGradient', 'miniClose'); // replace() here works around a browser bug where SVGs will disappear if you remove one that has the same gradient name as another.
+        closeX.onclick = function(e) {
+            if (v.noticeTimers[unique]) {
+                clearTimeout(v.noticeTimers[unique]);
+            }
+            u.removeElement(notice);
+            go.Input.capture();
+        }
+        notice.appendChild(messageSpan);
+        notice.appendChild(closeX);
         noticeContainer.appendChild(notice);
-        setTimeout(function() {
-            go.Visual.applyStyle(notice, {'opacity': 0});
-            setTimeout(function() {
-                u.removeElement(notice);
-            }, timeout+removeTimeout);
-        }, timeout);
-        go.Visual.lastMessage = message;
-        go.Visual.sinceLastMessage = new Date();
+        if (!v.noticeTimers) {
+            v.noticeTimers = {}
+        }
+        removeFunc();
+        notice.onmouseover = function(e) {
+            clearTimeout(v.noticeTimers[unique]);
+            v.disableTransitions(notice);
+            v.applyStyle(notice, {'opacity': 1});
+        }
+        notice.onmouseout = function(e) {
+            v.enableTransitions(notice);
+            removeFunc();
+        }
+        v.lastMessage = message;
+        v.sinceLastMessage = new Date();
     },
     setTitleAction: function(titleObj) {
         // Sets the title of titleObj['term'] to titleObj['title']
@@ -2910,7 +3021,8 @@ GateOne.Base.update(GateOne.Visual, {
         go.terminals[term]['X11Title'] = title;
         // Only set the title of the terminal if it hasn't been overridden
         if (!go.Terminal.manualTitle) {
-            termNode.title = title;
+//             termNode.title = title;
+            go.terminals[term]['title'] = title;
             sideinfo.innerHTML = term + ": " + title;
             sideinfo.style.right = scrollbarAdjust + 'px';
             // Also update the info panel
@@ -2928,7 +3040,7 @@ GateOne.Base.update(GateOne.Visual, {
         // Plays a bell sound and pops up a message indiciating which terminal issued a bell
         var term = bellObj['term'];
         go.Visual.playBell();
-        go.Visual.displayMessage("Bell in " + term + ": " + go.Utils.getNode('#'+go.prefs.prefix+'term' + term).title);
+        go.Visual.displayMessage("Bell in " + term + ": " + go.terminals[term]['title']);
     },
     playBell: function() {
         // Plays the bell sound without any visual notification.
@@ -2959,7 +3071,7 @@ GateOne.Base.update(GateOne.Visual, {
                     clearTimeout(go.terminals[termNum]['scrollbackTimer']);
                     go.terminals[termNum]['scrollbackTimer'] = setTimeout(function() {
                         go.Visual.enableScrollback(termNum);
-                    }, 3500);
+                    }, 500);
                     return;
                 }
                 // Only set the height of the terminal if we could measure it (depending on the CSS the parent element might have a height of 0)
@@ -2977,7 +3089,7 @@ GateOne.Base.update(GateOne.Visual, {
                     u.scrollToBottom(termPreNode);
                 } else {
                     // Create the span that holds the scrollback buffer
-                    termScrollback = u.createElement('span', {'id': 'term'+termNum+'scrollback'});
+                    termScrollback = u.createElement('span', {'id': 'term'+termNum+'scrollback', 'class': 'scrollback'});
                     termScrollback.innerHTML = go.terminals[termNum]['scrollback'].join('\n') + '\n';
                     termPreNode.insertBefore(termScrollback, termScreen);
                     go.terminals[termNum]['scrollbackNode'] = termScrollback;
@@ -3014,8 +3126,7 @@ GateOne.Base.update(GateOne.Visual, {
         // Replaces the contents of the selected terminal with just the screen (i.e. no scrollback)
         // If *term* is given, only disable scrollback for that terminal
         var u = go.Utils,
-            prefix = go.prefs.prefix,
-            textTransforms = go.Terminal.textTransforms;
+            prefix = go.prefs.prefix;
         if (term) {
             var termPreNode = GateOne.terminals[term]['node'],
                 termScrollback = go.terminals[term]['scrollbackNode'];
@@ -3098,7 +3209,7 @@ GateOne.Base.update(GateOne.Visual, {
                 monitorActivity.checked = go.terminals[term]['activityNotify'];
             };
         if (termObj) {
-            displayText = termObj.id.split(prefix+'term')[1] + ": " + termObj.title;
+            displayText = termObj.id.split(prefix+'term')[1] + ": " + go.terminals[term]['title'];
             termTitleH2.innerHTML = displayText;
             setActivityCheckboxes(term);
         } else {
@@ -3143,6 +3254,7 @@ GateOne.Base.update(GateOne.Visual, {
                 } else {
                     v.applyTransform(termNode, 'translate(-' + wPX + 'px, -' + hPX + 'px) scale(0.5)');
                 }
+                u.scrollToBottom(termNode);
             });
         }, 1);
         // Now hide everything but the terminal in the primary view
@@ -3167,6 +3279,7 @@ GateOne.Base.update(GateOne.Visual, {
             // Cancel any pending scrollback timers to keep the user experience smooth
             if (go.terminals[term]['scrollbackTimer']) {
                 clearTimeout(go.terminals[term]['scrollbackTimer']);
+                go.terminals[term]['scrollbackTimer'] = null;
             }
             go.terminals[term]['scrollbackTimer'] = setTimeout(reScrollback, 1000);
         }
@@ -3390,9 +3503,9 @@ GateOne.Base.update(GateOne.Visual, {
                     count += 1;
                     termObj.onclick = selectTermFunc;
                     termObj.onmouseover = function(e) {
-                        var displayText = termObj.id.split(prefix+'term')[1] + ": " + termObj.title,
+                        var displayText = termObj.id.split(prefix+'term')[1] + ": " + go.terminals[termID]['title'],
                             termInfoDiv = u.createElement('div', {'id': 'terminfo'}),
-                            marginFix = Math.round(termObj.title.length/2),
+                            marginFix = Math.round(go.terminals[termID]['title'].length/2),
                             infoContainer = u.createElement('div', {'id': 'infocontainer', 'style': {'margin-right': '-' + marginFix + 'em'}});
                         if (u.getNode('#'+prefix+'infocontainer')) { u.removeElement('#'+prefix+'infocontainer') }
                         termInfoDiv.innerHTML = displayText;
@@ -3579,7 +3692,11 @@ GateOne.Base.update(GateOne.Visual, {
                     v.dialogs[0].style.opacity = 1; // Set the new-first dialog back to fully visible
                 }
                 // Return focus to the previously-active element
-                prevActiveElement.focus();
+                if (prevActiveElement == goDiv) {
+                    go.Input.capture();
+                } else {
+                    prevActiveElement.focus();
+                }
             };
         // Keep track of all open dialogs so we can determine the foreground order
         if (!v.dialogs) {
@@ -3836,7 +3953,7 @@ GateOne.Base.update(GateOne.Visual, {
         }, 50);
         close.innerHTML = go.Icons['panelclose'];
         close.onclick = closeWidget;
-        configure.innerHTML = go.Icons['prefs'];
+        configure.innerHTML = go.Icons['prefs'].replace('prefsGradient', 'widgetGradient' + u.randomPrime());
         widgetTitle.innerHTML = title;
         if (options.onconfig) {
             configure.onclick = options.onconfig;
@@ -3986,11 +4103,11 @@ go.Base.update(GateOne.Terminal, {
             logDebug = GateOne.Logging.logDebug;
         }
         // Create our info panel
-        go.Icons['info'] = '<svg xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://www.w3.org/2000/svg" height="18" width="18" version="1.1" xmlns:cc="http://creativecommons.org/ns#" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:dc="http://purl.org/dc/elements/1.1/"><defs><linearGradient id="linearGradient12680" y2="294.5" gradientUnits="userSpaceOnUse" x2="253.59" gradientTransform="translate(244.48201,276.279)" y1="276.28" x1="253.59"><stop class="stop1" offset="0"/><stop class="stop2" offset="0.4944"/><stop class="stop3" offset="0.5"/><stop class="stop4" offset="1"/></linearGradient></defs><metadata><rdf:RDF><cc:Work rdf:about=""><dc:format>image/svg+xml</dc:format><dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/><dc:title/></cc:Work></rdf:RDF></metadata><g transform="translate(-396.60679,-820.39654)"><g transform="translate(152.12479,544.11754)"><path fill="url(#linearGradient12680)" d="m257.6,278.53c-3.001-3-7.865-3-10.867,0-3,3.001-3,7.868,0,10.866,2.587,2.59,6.561,2.939,9.53,1.062l4.038,4.039,2.397-2.397-4.037-4.038c1.878-2.969,1.527-6.943-1.061-9.532zm-1.685,9.18c-2.07,2.069-5.426,2.069-7.494,0-2.071-2.069-2.071-5.425,0-7.494,2.068-2.07,5.424-2.07,7.494,0,2.068,2.069,2.068,5.425,0,7.494z"/></g></g></svg>';
+        go.Icons['info'] = '<svg xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://www.w3.org/2000/svg" height="18" width="18" version="1.1" xmlns:cc="http://creativecommons.org/ns#" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:dc="http://purl.org/dc/elements/1.1/"><defs><linearGradient id="infoGradient" y2="294.5" gradientUnits="userSpaceOnUse" x2="253.59" gradientTransform="translate(244.48201,276.279)" y1="276.28" x1="253.59"><stop class="stop1" offset="0"/><stop class="stop2" offset="0.4944"/><stop class="stop3" offset="0.5"/><stop class="stop4" offset="1"/></linearGradient></defs><metadata><rdf:RDF><cc:Work rdf:about=""><dc:format>image/svg+xml</dc:format><dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/><dc:title/></cc:Work></rdf:RDF></metadata><g transform="translate(-396.60679,-820.39654)"><g transform="translate(152.12479,544.11754)"><path fill="url(#infoGradient)" d="m257.6,278.53c-3.001-3-7.865-3-10.867,0-3,3.001-3,7.868,0,10.866,2.587,2.59,6.561,2.939,9.53,1.062l4.038,4.039,2.397-2.397-4.037-4.038c1.878-2.969,1.527-6.943-1.061-9.532zm-1.685,9.18c-2.07,2.069-5.426,2.069-7.494,0-2.071-2.069-2.071-5.425,0-7.494,2.068-2.07,5.424-2.07,7.494,0,2.068,2.069,2.068,5.425,0,7.494z"/></g></g></svg>';
         toolbarInfo.innerHTML = go.Icons['info'];
-        go.Icons['close'] = '<svg xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://www.w3.org/2000/svg" height="18" width="18" version="1.1" xmlns:cc="http://creativecommons.org/ns#" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:dc="http://purl.org/dc/elements/1.1/"><defs><linearGradient id="linearGradient3010" y2="252.75" gradientUnits="userSpaceOnUse" y1="232.75" x2="487.8" x1="487.8"><stop class="stop1" offset="0"/><stop class="stop2" offset="0.4944"/><stop class="stop3" offset="0.5"/><stop class="stop4" offset="1"/></linearGradient></defs><metadata><rdf:RDF><cc:Work rdf:about=""><dc:format>image/svg+xml</dc:format><dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/><dc:title/></cc:Work></rdf:RDF></metadata><g transform="matrix(1.115933,0,0,1.1152416,-461.92317,-695.12248)"><g transform="translate(-61.7655,388.61318)" fill="url(#linearGradient3010)"><polygon points="483.76,240.02,486.5,242.75,491.83,237.42,489.1,234.68"/><polygon points="478.43,250.82,483.77,245.48,481.03,242.75,475.7,248.08"/><polygon points="491.83,248.08,486.5,242.75,483.77,245.48,489.1,250.82"/><polygon points="475.7,237.42,481.03,242.75,483.76,240.02,478.43,234.68"/><polygon points="483.77,245.48,486.5,242.75,483.76,240.02,481.03,242.75"/><polygon points="483.77,245.48,486.5,242.75,483.76,240.02,481.03,242.75"/></g></g></svg>';
+        go.Icons['close'] = '<svg xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://www.w3.org/2000/svg" height="18" width="18" version="1.1" xmlns:cc="http://creativecommons.org/ns#" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:dc="http://purl.org/dc/elements/1.1/"><defs><linearGradient id="closeGradient" y2="252.75" gradientUnits="userSpaceOnUse" y1="232.75" x2="487.8" x1="487.8"><stop class="stop1" offset="0"/><stop class="stop2" offset="0.4944"/><stop class="stop3" offset="0.5"/><stop class="stop4" offset="1"/></linearGradient></defs><metadata><rdf:RDF><cc:Work rdf:about=""><dc:format>image/svg+xml</dc:format><dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/><dc:title/></cc:Work></rdf:RDF></metadata><g transform="matrix(1.115933,0,0,1.1152416,-461.92317,-695.12248)"><g transform="translate(-61.7655,388.61318)" fill="url(#closeGradient)"><polygon points="483.76,240.02,486.5,242.75,491.83,237.42,489.1,234.68"/><polygon points="478.43,250.82,483.77,245.48,481.03,242.75,475.7,248.08"/><polygon points="491.83,248.08,486.5,242.75,483.77,245.48,489.1,250.82"/><polygon points="475.7,237.42,481.03,242.75,483.76,240.02,478.43,234.68"/><polygon points="483.77,245.48,486.5,242.75,483.76,240.02,481.03,242.75"/><polygon points="483.77,245.48,486.5,242.75,483.76,240.02,481.03,242.75"/></g></g></svg>';
         toolbarClose.innerHTML = go.Icons['close'];
-        go.Icons['newTerm'] = '<svg xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://www.w3.org/2000/svg" height="18" width="18" version="1.1" xmlns:cc="http://creativecommons.org/ns#" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:dc="http://purl.org/dc/elements/1.1/"><defs><linearGradient id="linearGradient12259" y2="234.18" gradientUnits="userSpaceOnUse" x2="561.42" y1="252.18" x1="561.42"><stop class="stop1" offset="0"/><stop class="stop2" offset="0.4944"/><stop class="stop3" offset="0.5"/><stop class="stop4" offset="1"/></linearGradient></defs><metadata><rdf:RDF><cc:Work rdf:about=""><dc:format>image/svg+xml</dc:format><dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/><dc:title/></cc:Work></rdf:RDF></metadata><g transform="translate(-261.95455,-486.69334)"><g transform="matrix(0.94996733,0,0,0.94996733,-256.96226,264.67838)"><rect height="3.867" width="7.54" y="241.25" x="557.66" fill="url(#linearGradient12259)"/><rect height="3.866" width="7.541" y="241.25" x="546.25" fill="url(#linearGradient12259)"/><rect height="7.541" width="3.867" y="245.12" x="553.79" fill="url(#linearGradient12259)"/><rect height="7.541" width="3.867" y="233.71" x="553.79" fill="url(#linearGradient12259)"/><rect height="3.867" width="3.867" y="241.25" x="553.79" fill="url(#linearGradient12259)"/><rect height="3.867" width="3.867" y="241.25" x="553.79" fill="url(#linearGradient12259)"/></g></g></svg>';
+        go.Icons['newTerm'] = '<svg xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://www.w3.org/2000/svg" height="18" width="18" version="1.1" xmlns:cc="http://creativecommons.org/ns#" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:dc="http://purl.org/dc/elements/1.1/"><defs><linearGradient id="newTermGradient" y2="234.18" gradientUnits="userSpaceOnUse" x2="561.42" y1="252.18" x1="561.42"><stop class="stop1" offset="0"/><stop class="stop2" offset="0.4944"/><stop class="stop3" offset="0.5"/><stop class="stop4" offset="1"/></linearGradient></defs><metadata><rdf:RDF><cc:Work rdf:about=""><dc:format>image/svg+xml</dc:format><dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/><dc:title/></cc:Work></rdf:RDF></metadata><g transform="translate(-261.95455,-486.69334)"><g transform="matrix(0.94996733,0,0,0.94996733,-256.96226,264.67838)"><rect height="3.867" width="7.54" y="241.25" x="557.66" fill="url(#newTermGradient)"/><rect height="3.866" width="7.541" y="241.25" x="546.25" fill="url(#newTermGradient)"/><rect height="7.541" width="3.867" y="245.12" x="553.79" fill="url(#newTermGradient)"/><rect height="7.541" width="3.867" y="233.71" x="553.79" fill="url(#newTermGradient)"/><rect height="3.867" width="3.867" y="241.25" x="553.79" fill="url(#newTermGradient)"/><rect height="3.867" width="3.867" y="241.25" x="553.79" fill="url(#newTermGradient)"/></g></g></svg>';
         toolbarNewTerm.innerHTML = go.Icons['newTerm'];
         infoPanelH2.innerHTML = "Gate One";
         infoPanelH2.title = "Click to edit.  Leave blank for default.";
@@ -4035,7 +4152,7 @@ go.Base.update(GateOne.Terminal, {
             var term = localStorage[prefix+'selectedTerminal'],
                 monitorInactivity = u.getNode('#'+prefix+'monitor_inactivity'),
                 monitorActivity = u.getNode('#'+prefix+'monitor_activity'),
-                termTitle = u.getNode('#'+prefix+'term'+term).title;
+                termTitle = go.terminals[term]['title'];
             if (monitorInactivity.checked) {
                 var inactivity = function() {
                     go.Terminal.notifyInactivity(termTitle);
@@ -4060,7 +4177,7 @@ go.Base.update(GateOne.Terminal, {
             var term = localStorage[prefix+'selectedTerminal'],
                 monitorInactivity = u.getNode('#'+prefix+'monitor_inactivity'),
                 monitorActivity = u.getNode('#'+prefix+'monitor_activity'),
-                termTitle = u.getNode('#'+prefix+'term'+term).title;
+                termTitle = go.terminals[term]['title'];
             if (monitorActivity.checked) {
                 go.terminals[term]['activityNotify'] = true;
                 if (go.terminals[term]['inactivityTimer']) {
@@ -4081,7 +4198,7 @@ go.Base.update(GateOne.Terminal, {
         }
         var editTitle =  function(e) {
             var term = localStorage[prefix+'selectedTerminal'],
-                title = u.getNode('#'+prefix+'term'+term).title,
+                title = go.terminals[term]['title'],
                 titleEdit = u.createElement('input', {'type': 'text', 'name': 'title', 'value': title, 'id': go.prefs.prefix + 'title_edit'}),
                 finishEditing = function(e) {
                     var newTitle = titleEdit.value,
@@ -4190,7 +4307,6 @@ go.Base.update(GateOne.Terminal, {
         }
         goDiv.appendChild(tempPaste);
         tempPaste.focus();
-        // Since we're not calling preventDefault() on this event, by shifting focus to the pastearea (which is a textarea) the browser will execute the regular shift-Inert event (which is pasting =)
 //         setTimeout(function() {
 //             u.getNode(go.prefs.goDiv).contentEditable = false;
 //         }, 100);
@@ -4225,7 +4341,8 @@ go.Base.update(GateOne.Terminal, {
         // NOTE:  Lines in *screen* that are empty strings or null will be ignored (so it is safe to pass a full array with only a single updated line)
         var u = GateOne.Utils,
             prefix = GateOne.prefs.prefix,
-            existingPre = GateOne.terminals[term]['node'];
+            existingPre = GateOne.terminals[term]['node'],
+            existingScreen = GateOne.terminals[term]['screenNode'];
         if (!term) {
             term = localStorage[prefix+'selectedTerminal'];
         }
@@ -4233,20 +4350,20 @@ go.Base.update(GateOne.Terminal, {
             if (screen[i].length) {
                 // TODO: Get this using pre-cached line nodes
                 if (GateOne.terminals[term]['screen'][i] != screen[i]) {
-                    var existingLine = existingPre.querySelector(GateOne.prefs.goDiv + ' .' + prefix + 'line_' + i);
+                    var existingLine = existingScreen.querySelector(GateOne.prefs.goDiv + ' .' + prefix + 'line_' + i);
                     if (existingLine) {
                         existingLine.innerHTML = screen[i] + '\n';
                     } else { // Size of the terminal increased
-                        var lineSpan = u.createElement('span', {'class': 'line_' + i});
+                        var classes = 'termline ' + prefix + 'line_' + i,
+                            lineSpan = u.createElement('span', {'class': classes});
                         lineSpan.innerHTML = screen[i] + '\n';
-                        existingPre.appendChild(lineSpan);
+                        existingScreen.appendChild(lineSpan);
                     }
                     // Update the existing screen array in-place to cut down on GC
                     GateOne.terminals[term]['screen'][i] = screen[i];
                 }
             }
         }
-        u.scrollToBottom(existingPre);
     },
     termUpdateFromWorker: function(e) {
         var u = GateOne.Utils,
@@ -4262,11 +4379,9 @@ go.Base.update(GateOne.Terminal, {
             goDiv = u.getNode(GateOne.prefs.goDiv),
             termContainer = u.getNode('#'+prefix+'term'+term),
             existingPre = GateOne.terminals[term]['node'],
-            existingScreen = GateOne.terminals[term]['screenNode'],
-            reScrollback = u.partial(GateOne.Visual.enableScrollback, term),
-            writeScrollback = u.partial(GateOne.Terminal.writeScrollback, term, scrollback);
+            existingScreen = GateOne.terminals[term]['screenNode'];
         if (term && GateOne.terminals[term]) {
-            termTitle = u.getNode('#'+prefix+'term'+term).title;
+            termTitle = go.terminals[term]['title'];
         } else {
             // Terminal was likely just closed.
             return;
@@ -4275,24 +4390,54 @@ go.Base.update(GateOne.Terminal, {
             try {
                 if (existingScreen && GateOne.terminals[term]['screen'].length != screen.length) {
                     // Resized
+                    var prevLength = GateOne.terminals[term]['screen'].length;
                     GateOne.terminals[term]['screen'].length = screen.length; // Resize the array to match
-                    for (var i=0; i < screen.length; i++) {
-                        var existingLine = existingPre.querySelector(GateOne.prefs.goDiv + ' .' + prefix + 'line_' + i),
-                            lineSpan = u.createElement('span', {'class': prefix + 'line_' + i});
-                        if (!existingLine) {
-                            lineSpan.innerHTML = screen[i] + '\n';
-                            existingScreen.appendChild(lineSpan);
-                            // Update the existing screen array in-place to cut down on GC
-                            GateOne.terminals[term]['screen'][i] = screen[i];
+                    if (prevLength < screen.length) {
+                        // Grow to fit
+                        for (var i=0; i < screen.length; i++) {
+                            var classes = 'termline ' + prefix + 'line_' + i,
+                                existingLine = existingPre.querySelector(GateOne.prefs.goDiv + ' .' + prefix + 'line_' + i),
+                                lineSpan = u.createElement('span', {'class': classes});
+                            if (!existingLine) {
+                                lineSpan.innerHTML = screen[i] + '\n';
+                                existingScreen.appendChild(lineSpan);
+                                // Update the existing screen array in-place to cut down on GC
+                                GateOne.terminals[term]['screen'][i] = screen[i];
+                            }
+                        }
+                    } else {
+                        // Shrink to fit
+                        for (var i=0; i < prevLength; i++) {
+                            var classes = 'termline ' + prefix + 'line_' + i,
+                                existingLine = existingPre.querySelector(GateOne.prefs.goDiv + ' .' + prefix + 'line_' + i);
+                            if (existingLine) {
+                                if (i >= screen.length) {
+                                   u.removeElement(existingLine);
+                                }
+                            }
                         }
                     }
+                    u.scrollToBottom(existingPre);
                 }
                 if (existingScreen) { // Update the terminal display
+                    // Get the current scrollbar position so we can make a determination as to whether or not we should scroll to the bottom.
+                    var scroll = false;
+                    if ((existingPre.scrollHeight - existingPre.scrollTop) == existingPre.clientHeight) {
+                        scroll = true;
+                    }
+                    // NOTE: Why would we need to scroll to the bottom if it is *already* scrolled to the bottom?  Because, when the entire screen is updated and there's really long lines or images it can result in the page being scrolled up a bit.  If the screen was scrolled all the way to the bottom before we applied an update we know that we should scroll to the bottom again.
                     GateOne.Terminal.applyScreen(screen, term);
+                    if (scroll) {
+                        setTimeout(function() {
+                            // It can take a second for the browser to draw everything so we wait just a moment before scrolling
+                            u.scrollToBottom(existingPre);
+                        }, 100);
+                    }
                 } else { // Create the elements necessary to display the screen
-                    var screenSpan = u.createElement('span', {'id': 'term'+term+'screen'});
+                    var screenSpan = u.createElement('span', {'id': 'term'+term+'screen', 'class': 'screen'});
                     for (var i=0; i < screen.length; i++) {
-                        var lineSpan = u.createElement('span', {'class': prefix + 'line_' + i});
+                        var classes = 'termline ' + prefix + 'line_' + i,
+                            lineSpan = u.createElement('span', {'class': classes});
                         lineSpan.innerHTML = screen[i] + '\n';
                         screenSpan.appendChild(lineSpan);
                         // Update the existing screen array in-place to cut down on GC
@@ -4380,22 +4525,18 @@ go.Base.update(GateOne.Terminal, {
                 screen = null;
             }
         }
-        if (scrollback.length) {
+        if (scrollback.length && GateOne.terminals[term]['scrollback'].toString() != scrollback.toString()) {
+            var reScrollback = u.partial(GateOne.Visual.enableScrollback, term),
+                writeScrollback = u.partial(GateOne.Terminal.writeScrollback, term, scrollback);
             GateOne.terminals[term]['scrollback'] = scrollback;
             // We wrap the logic that stores the scrollback buffer in a timer so we're not writing to localStorage (aka "to disk") every nth of a second for fast screen refreshes (e.g. fast typers).  Writing to localStorage is a blocking operation so this could speed things up considerable for larger terminal sizes.
             clearTimeout(GateOne.terminals[term]['scrollbackWriteTimer']);
             GateOne.terminals[term]['scrollbackWriteTimer'] = null;
             // This will save the scrollback buffer after 3.5 seconds of terminal inactivity (idle)
-            try {
-                GateOne.terminals[term]['scrollbackWriteTimer'] = setTimeout(writeScrollback, 3500);
-            } finally {
-                writeScrollback = null;
-                scrollback = null;
-            }
+            GateOne.terminals[term]['scrollbackWriteTimer'] = setTimeout(writeScrollback, 3500);
             // This updates the scrollback buffer in the DOM
             clearTimeout(GateOne.terminals[term]['scrollbackTimer']);
-            GateOne.terminals[term]['scrollbackTimer'] = null;
-            // This timeout re-adds the scrollback buffer after .5 seconds.  If we don't do this it can slow down the responsiveness quite a bit
+            // This timeout re-adds the scrollback buffer after .75 seconds.  If we don't do this it can slow down the responsiveness quite a bit
             GateOne.terminals[term]['scrollbackTimer'] = setTimeout(reScrollback, 500); // Just enough to de-bounce (to keep things smooth)
         }
         if (consoleLog) {
@@ -4444,7 +4585,6 @@ go.Base.update(GateOne.Terminal, {
                 }
             }
         }
-        return null;
     },
     loadWebWorkerAction: function(source) {
         // Loads our Web Worker given it's *source* (which is sent to us over the WebSocket which is a clever workaround to the origin limitations of Web Workers =).
@@ -4603,6 +4743,7 @@ go.Base.update(GateOne.Terminal, {
             backspace: String.fromCharCode(127), // ^?
             screen: [],
             prevScreen: [],
+            title: 'Gate One',
             scrollback: [],
             scrollbackTimer: null // Controls re-adding scrollback buffer
         };
@@ -4622,9 +4763,9 @@ go.Base.update(GateOne.Terminal, {
         }
         if (!go.prefs.embedded) {
             // Prepare the terminal div for the grid
-            terminal = u.createElement('div', {'id': currentTerm, 'title': 'Gate One', 'class': 'terminal', 'style': {'width': go.Visual.goDimensions.w + 'px', 'height': go.Visual.goDimensions.h + 'px'}});
+            terminal = u.createElement('div', {'id': currentTerm, 'class': 'terminal', 'style': {'width': go.Visual.goDimensions.w + 'px', 'height': go.Visual.goDimensions.h + 'px'}});
         } else {
-            terminal = u.createElement('div', {'id': currentTerm, 'title': 'Gate One', 'class': 'terminal'});
+            terminal = u.createElement('div', {'id': currentTerm, 'class': 'terminal'});
         }
         // This ensures that we re-enable input if the user clicked somewhere else on the page then clicked back on the terminal:
 //         terminal.addEventListener('click', go.Input.capture, false);
@@ -4643,6 +4784,9 @@ go.Base.update(GateOne.Terminal, {
                 var go = GateOne,
                     pasted = pastearea.value,
                     lines = pasted.split('\n');
+                if (go.Input.handlingPaste) {
+                    return;
+                }
                 if (lines.length > 1) {
                     // If we're pasting stuff with newlines we should strip trailing whitespace so the lines show up correctly.  In all but a few cases this is what the user expects.
                     for (var i=0; i < lines.length; i++) {
@@ -4653,6 +4797,7 @@ go.Base.update(GateOne.Terminal, {
                 go.Input.queue(pasted);
                 pastearea.value = "";
                 go.Net.sendChars();
+                go.Input.capture();
             },
             pasteareaScroll = function(e) {
                 // We have to hide the pastearea so we can scroll the terminal underneath
@@ -4671,16 +4816,75 @@ go.Base.update(GateOne.Terminal, {
         pastearea.oninput = pasteareaOnInput;
         pastearea.addEventListener(mousewheelevt, pasteareaScroll, true);
         pastearea.onpaste = function(e) {
+            go.Input.onPaste(e);
             // Start capturing input again
-            pastearea.value = '';
             setTimeout(function() {
                 // For some reason when you paste the onmouseup event doesn't fire on goDiv; goFigure
                 go.Input.mouseDown = false;
                 GateOne.Input.capture();
+                pastearea.value = ''; // Empty it out to ensure there's no leftovers in subsequent pastes
             }, 1);
         }
         pastearea.oncontextmenu = function(e) {
             pastearea.focus();
+        }
+        pastearea.onmousemove = function(e) {
+            var go = GateOne,
+                u = go.Utils,
+                prefix = go.prefs.prefix,
+                termline = null,
+                elem = null,
+                maxRecursion = 10,
+                count = 0,
+                X = e.clientX,
+                Y = e.clientY,
+                timeout = 200;
+            if (pastearea.style.display != 'none') {
+                u.hideElement(pastearea);
+                go.Input.pasteareaTemp = pastearea.onmousemove;
+                pastearea.onmouseover = null;
+            }
+            var elementUnder = document.elementFromPoint(X, Y);
+            while (!termline) {
+                // Look for special things under the mouse until we've reached the parent container of the line
+                count += 1;
+                if (count > maxRecursion) {
+                    break;
+                }
+                if (!elem) {
+                    elem = elementUnder;
+                }
+                if (typeof(elem.className) == "undefined") {
+                    break;
+                }
+                if (elem.className.indexOf && elem.className.indexOf('termline') != -1) {
+                    termline = elem; // End it
+                } else if (elem.tagName.toLowerCase && elem.tagName.toLowerCase() == 'a') {
+                    // Anchor elements mean we shouldn't make the pastearea reappear so the user can click on them
+                    if (go.Terminal.pasteAreaTimer) {
+                        clearTimeout(go.Terminal.pasteAreaTimer);
+                        go.Terminal.pasteAreaTimer = null;
+                    }
+                    return;
+                } else if (elem.className.indexOf && elem.className.indexOf('clickable') != -1) {
+                    // Clickable elements mean we shouldn't make the pastearea reappear
+                    if (go.Terminal.pasteAreaTimer) {
+                        clearTimeout(go.Terminal.pasteAreaTimer);
+                        go.Terminal.pasteAreaTimer = null;
+                    }
+                    return;
+                } else {
+                    elem = elem.parentNode;
+                }
+            }
+            if (go.Terminal.pasteAreaTimer) {
+                return; // Let it return to visibility on its own
+            }
+            go.Terminal.pasteAreaTimer = setTimeout(function() {
+                pastearea.onmousemove = go.Input.pasteareaTemp;
+                go.Terminal.pasteAreaTimer = null;
+                u.showElement(pastearea);
+            }, timeout);
         }
         pastearea.onmousedown = function(e) {
             // When the user left-clicks assume they're trying to highlight text
@@ -4701,8 +4905,16 @@ go.Base.update(GateOne.Terminal, {
                 selectedTerm = localStorage[prefix+'selectedTerminal'];
             if (m.button.left) { // Left button depressed
                 u.hideElement(pastearea);
+                if (go.Terminal.pasteAreaTimer) {
+                    clearTimeout(go.Terminal.pasteAreaTimer);
+                }
+                var elementUnder = document.elementFromPoint(X, Y);
+                if (typeof(elementUnder.onclick) == "function") {
+                    // Fire the onclick event
+                    elementUnder.onclick(e); // Pass through the event
+                }
                 // This lets users click on links underneath the pastearea
-                if (document.elementFromPoint(X, Y).tagName == "A") {
+                if (elementUnder.tagName == "A") {
                     window.open(document.elementFromPoint(X, Y).href);
                 }
                 // Don't add the scrollback if the user is highlighting text--it will mess it up
@@ -4719,6 +4931,10 @@ go.Base.update(GateOne.Terminal, {
                 } catch (e) {
                     // Browser won't let us execute a paste event...  Hope for the best with the pastearea!
                     ;; // Ignore
+                }
+            } else if (m.button.right) {
+                if (u.getSelText()) {
+                    u.hideElement(pastearea);
                 }
             }
         }
@@ -4758,7 +4974,7 @@ go.Base.update(GateOne.Terminal, {
         // If noCleanup resolves to true, stored data will be left hanging around for this terminal (e.g. the scrollback buffer in localStorage).  Otherwise it will be deleted.
         var u = GateOne.Utils,
             prefix = go.prefs.prefix,
-            message = "Closed term " + term + ": " + u.getNode('#'+prefix+'term' + term).title,
+            message = "Closed term " + term + ": " + go.terminals[term]['title'],
             lastTerm = null;
         // Tell the server to kill the terminal
         go.Net.killTerminal(term);
@@ -4889,14 +5105,26 @@ go.Base.update(GateOne.Terminal, {
         // For example, if you typed "Ticket number: IM123456789" into a terminal it would be transformed thusly:
         //      "Ticket number: <a href='https://support.company.com/tracker?ticket=IM123456789' target='new'>IM123456789</a>"
         //
+        // Alternatively, a function may be provided instead of *pattern*.  In this case, each line will be transformed like so:
+        //      line = pattern(line);
+        //
         // NOTE: *name* is only used for reference purposes in the textTransforms object.
-        var go = GateOne;
-        if (typeof(pattern) == "object") {
+        var go = GateOne,
+            t = go.Terminal;
+        if (typeof(pattern) == "object" || typeof(pattern) == "function") {
             pattern = pattern.toString(); // Have to convert it to a string so we can pass it to the Web Worker so Firefox won't freak out
         }
-        go.Terminal.textTransforms[name] = {};
-        go.Terminal.textTransforms[name]['pattern'] = pattern;
-        go.Terminal.textTransforms[name]['newString'] = newString;
+        t.textTransforms[name] = {};
+        t.textTransforms[name]['name'] = name;
+        t.textTransforms[name]['pattern'] = pattern;
+        t.textTransforms[name]['newString'] = newString;
+    },
+    unregisterTextTransform: function(name) {
+        /**:GateOne.Terminal.unregisterTextTransform(name)
+
+            Removes the given text transform from GateOne.Terminal.textTransforms
+        */
+        delete GateOne.Terminal.textTransforms[name];
     },
     resetTerminalAction: function(term) {
         // Clears the screen and the scrollback buffer (in memory and in localStorage)
@@ -5058,7 +5286,11 @@ GateOne.Base.update(GateOne.User, {
     },
     storeSession: function(message) {
         //  Stores the 'gateone_user' data in localStorage in a nearly identical fashion to how it gets stored in the 'gateone_user' cookie.
+        console.log('message: ' + message);
         localStorage[GateOne.prefs.prefix+'gateone_user'] = message;
+        // Delete the cookie just in case (it might be a leftover from testing during development; or something like that)
+        // Commented out the following because it still needs testing...  Probably won't work in many embedded situations since the browser won't let the client access a cookie belonging to a different FQDN.
+//         GateOne.Utils.deleteCookie('gateone_user');
     }
 });
 
@@ -5071,8 +5303,8 @@ GateOne.Net.actions = {
     'reauthenticate': GateOne.Net.reauthenticate
 }
 
-GateOne.Icons['prefs'] = '<svg xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://www.w3.org/2000/svg" height="18" width="18" version="1.1" xmlns:cc="http://creativecommons.org/ns#" xmlns:dc="http://purl.org/dc/elements/1.1/"><defs><linearGradient id="linearGradient15560" x1="85.834" gradientUnits="userSpaceOnUse" x2="85.834" gradientTransform="translate(288.45271,199.32483)" y1="363.23" y2="388.56"><stop class="stop1" offset="0"/><stop class="stop2" offset="0.4944"/><stop class="stop3" offset="0.5"/><stop class="stop4" offset="1"/></linearGradient></defs><metadata><rdf:RDF><cc:Work rdf:about=""><dc:format>image/svg+xml</dc:format><dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/><dc:title/></cc:Work></rdf:RDF></metadata><g transform="matrix(0.71050762,0,0,0.71053566,-256.93092,-399.71681)"><path fill="url(#linearGradient15560)" d="m386.95,573.97c0-0.32-0.264-0.582-0.582-0.582h-1.069c-0.324,0-0.662-0.25-0.751-0.559l-1.455-3.395c-0.155-0.277-0.104-0.69,0.123-0.918l0.723-0.723c0.227-0.228,0.227-0.599,0-0.824l-1.74-1.741c-0.226-0.228-0.597-0.228-0.828,0l-0.783,0.787c-0.23,0.228-0.649,0.289-0.931,0.141l-2.954-1.18c-0.309-0.087-0.561-0.423-0.561-0.742v-1.096c0-0.319-0.264-0.581-0.582-0.581h-2.464c-0.32,0-0.583,0.262-0.583,0.581v1.096c0,0.319-0.252,0.657-0.557,0.752l-3.426,1.467c-0.273,0.161-0.683,0.106-0.912-0.118l-0.769-0.77c-0.226-0.226-0.597-0.226-0.824,0l-1.741,1.742c-0.229,0.228-0.229,0.599,0,0.825l0.835,0.839c0.23,0.228,0.293,0.642,0.145,0.928l-1.165,2.927c-0.085,0.312-0.419,0.562-0.742,0.562h-1.162c-0.319,0-0.579,0.262-0.579,0.582v2.463c0,0.322,0.26,0.585,0.579,0.585h1.162c0.323,0,0.66,0.249,0.753,0.557l1.429,3.369c0.164,0.276,0.107,0.688-0.115,0.916l-0.802,0.797c-0.226,0.227-0.226,0.596,0,0.823l1.744,1.741c0.227,0.228,0.598,0.228,0.821,0l0.856-0.851c0.227-0.228,0.638-0.289,0.925-0.137l2.987,1.192c0.304,0.088,0.557,0.424,0.557,0.742v1.141c0,0.32,0.263,0.582,0.583,0.582h2.464c0.318,0,0.582-0.262,0.582-0.582v-1.141c0-0.318,0.25-0.654,0.561-0.747l3.34-1.418c0.278-0.157,0.686-0.103,0.916,0.122l0.753,0.758c0.227,0.225,0.598,0.225,0.825,0l1.743-1.744c0.227-0.226,0.227-0.597,0-0.822l-0.805-0.802c-0.223-0.228-0.285-0.643-0.134-0.926l1.21-3.013c0.085-0.31,0.423-0.559,0.747-0.562h1.069c0.318,0,0.582-0.262,0.582-0.582v-2.461zm-12.666,5.397c-2.29,0-4.142-1.855-4.142-4.144s1.852-4.142,4.142-4.142c2.286,0,4.142,1.854,4.142,4.142s-1.855,4.144-4.142,4.144z"/></g></svg>';
-GateOne.Icons['back_arrow'] = '<svg xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://www.w3.org/2000/svg" height="18" width="18" version="1.1" xmlns:cc="http://creativecommons.org/ns#" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:dc="http://purl.org/dc/elements/1.1/"><defs><linearGradient id="linearGradient12573" y2="449.59" gradientUnits="userSpaceOnUse" x2="235.79" y1="479.59" x1="235.79"><stop class="panelstop1" offset="0"/><stop class="panelstop2" offset="0.4944"/><stop class="panelstop3" offset="0.5"/><stop class="panelstop4" offset="1"/></linearGradient></defs><metadata><rdf:RDF><cc:Work rdf:about=""><dc:format>image/svg+xml</dc:format><dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/><dc:title/></cc:Work></rdf:RDF></metadata><g transform="translate(-360.00001,-529.36218)"><g transform="matrix(0.6,0,0,0.6,227.52721,259.60639)"><circle d="m 250.78799,464.59299 c 0,8.28427 -6.71572,15 -15,15 -8.28427,0 -15,-6.71573 -15,-15 0,-8.28427 6.71573,-15 15,-15 8.28428,0 15,6.71573 15,15 z" cy="464.59" cx="235.79" r="15" fill="url(#linearGradient12573)"/><path fill="#FFF" d="m224.38,464.18,11.548,6.667v-3.426h5.003c2.459,0,5.24,3.226,5.24,3.226s-0.758-7.587-3.54-8.852c-2.783-1.265-6.703-0.859-6.703-0.859v-3.425l-11.548,6.669z"/></g></g></svg>';
-GateOne.Icons['panelclose'] = '<svg xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://www.w3.org/2000/svg" height="18" width="18" version="1.1" xmlns:cc="http://creativecommons.org/ns#" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:dc="http://purl.org/dc/elements/1.1/"><defs><linearGradient id="linearGradient3011" y2="252.75" gradientUnits="userSpaceOnUse" y1="232.75" x2="487.8" x1="487.8"><stop class="panelstop1" offset="0"/><stop class="panelstop2" offset="0.4944"/><stop class="panelstop3" offset="0.5"/><stop class="panelstop4" offset="1"/></linearGradient></defs><metadata><rdf:RDF><cc:Work rdf:about=""><dc:format>image/svg+xml</dc:format><dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/><dc:title/></cc:Work></rdf:RDF></metadata><g transform="matrix(1.115933,0,0,1.1152416,-461.92317,-695.12248)"><g transform="translate(-61.7655,388.61318)" fill="url(#linearGradient3011)"><polygon points="483.76,240.02,486.5,242.75,491.83,237.42,489.1,234.68"/><polygon points="478.43,250.82,483.77,245.48,481.03,242.75,475.7,248.08"/><polygon points="491.83,248.08,486.5,242.75,483.77,245.48,489.1,250.82"/><polygon points="475.7,237.42,481.03,242.75,483.76,240.02,478.43,234.68"/><polygon points="483.77,245.48,486.5,242.75,483.76,240.02,481.03,242.75"/><polygon points="483.77,245.48,486.5,242.75,483.76,240.02,481.03,242.75"/></g></g></svg>';
+GateOne.Icons['prefs'] = '<svg xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://www.w3.org/2000/svg" height="18" width="18" version="1.1" xmlns:cc="http://creativecommons.org/ns#" xmlns:dc="http://purl.org/dc/elements/1.1/"><defs><linearGradient id="prefsGradient" x1="85.834" gradientUnits="userSpaceOnUse" x2="85.834" gradientTransform="translate(288.45271,199.32483)" y1="363.23" y2="388.56"><stop class="stop1" offset="0"/><stop class="stop2" offset="0.4944"/><stop class="stop3" offset="0.5"/><stop class="stop4" offset="1"/></linearGradient></defs><metadata><rdf:RDF><cc:Work rdf:about=""><dc:format>image/svg+xml</dc:format><dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/><dc:title/></cc:Work></rdf:RDF></metadata><g transform="matrix(0.71050762,0,0,0.71053566,-256.93092,-399.71681)"><path fill="url(#prefsGradient)" d="m386.95,573.97c0-0.32-0.264-0.582-0.582-0.582h-1.069c-0.324,0-0.662-0.25-0.751-0.559l-1.455-3.395c-0.155-0.277-0.104-0.69,0.123-0.918l0.723-0.723c0.227-0.228,0.227-0.599,0-0.824l-1.74-1.741c-0.226-0.228-0.597-0.228-0.828,0l-0.783,0.787c-0.23,0.228-0.649,0.289-0.931,0.141l-2.954-1.18c-0.309-0.087-0.561-0.423-0.561-0.742v-1.096c0-0.319-0.264-0.581-0.582-0.581h-2.464c-0.32,0-0.583,0.262-0.583,0.581v1.096c0,0.319-0.252,0.657-0.557,0.752l-3.426,1.467c-0.273,0.161-0.683,0.106-0.912-0.118l-0.769-0.77c-0.226-0.226-0.597-0.226-0.824,0l-1.741,1.742c-0.229,0.228-0.229,0.599,0,0.825l0.835,0.839c0.23,0.228,0.293,0.642,0.145,0.928l-1.165,2.927c-0.085,0.312-0.419,0.562-0.742,0.562h-1.162c-0.319,0-0.579,0.262-0.579,0.582v2.463c0,0.322,0.26,0.585,0.579,0.585h1.162c0.323,0,0.66,0.249,0.753,0.557l1.429,3.369c0.164,0.276,0.107,0.688-0.115,0.916l-0.802,0.797c-0.226,0.227-0.226,0.596,0,0.823l1.744,1.741c0.227,0.228,0.598,0.228,0.821,0l0.856-0.851c0.227-0.228,0.638-0.289,0.925-0.137l2.987,1.192c0.304,0.088,0.557,0.424,0.557,0.742v1.141c0,0.32,0.263,0.582,0.583,0.582h2.464c0.318,0,0.582-0.262,0.582-0.582v-1.141c0-0.318,0.25-0.654,0.561-0.747l3.34-1.418c0.278-0.157,0.686-0.103,0.916,0.122l0.753,0.758c0.227,0.225,0.598,0.225,0.825,0l1.743-1.744c0.227-0.226,0.227-0.597,0-0.822l-0.805-0.802c-0.223-0.228-0.285-0.643-0.134-0.926l1.21-3.013c0.085-0.31,0.423-0.559,0.747-0.562h1.069c0.318,0,0.582-0.262,0.582-0.582v-2.461zm-12.666,5.397c-2.29,0-4.142-1.855-4.142-4.144s1.852-4.142,4.142-4.142c2.286,0,4.142,1.854,4.142,4.142s-1.855,4.144-4.142,4.144z"/></g></svg>';
+GateOne.Icons['back_arrow'] = '<svg xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://www.w3.org/2000/svg" height="18" width="18" version="1.1" xmlns:cc="http://creativecommons.org/ns#" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:dc="http://purl.org/dc/elements/1.1/"><defs><linearGradient id="backGradient" y2="449.59" gradientUnits="userSpaceOnUse" x2="235.79" y1="479.59" x1="235.79"><stop class="panelstop1" offset="0"/><stop class="panelstop2" offset="0.4944"/><stop class="panelstop3" offset="0.5"/><stop class="panelstop4" offset="1"/></linearGradient></defs><metadata><rdf:RDF><cc:Work rdf:about=""><dc:format>image/svg+xml</dc:format><dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/><dc:title/></cc:Work></rdf:RDF></metadata><g transform="translate(-360.00001,-529.36218)"><g transform="matrix(0.6,0,0,0.6,227.52721,259.60639)"><circle d="m 250.78799,464.59299 c 0,8.28427 -6.71572,15 -15,15 -8.28427,0 -15,-6.71573 -15,-15 0,-8.28427 6.71573,-15 15,-15 8.28428,0 15,6.71573 15,15 z" cy="464.59" cx="235.79" r="15" fill="url(#backGradient)"/><path fill="#FFF" d="m224.38,464.18,11.548,6.667v-3.426h5.003c2.459,0,5.24,3.226,5.24,3.226s-0.758-7.587-3.54-8.852c-2.783-1.265-6.703-0.859-6.703-0.859v-3.425l-11.548,6.669z"/></g></g></svg>';
+GateOne.Icons['panelclose'] = '<svg xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://www.w3.org/2000/svg" height="18" width="18" version="1.1" xmlns:cc="http://creativecommons.org/ns#" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><rdf:RDF><cc:Work rdf:about=""><dc:format>image/svg+xml</dc:format><dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/><dc:title/></cc:Work></rdf:RDF></metadata><g transform="matrix(1.115933,0,0,1.1152416,-461.92317,-695.12248)"><g transform="translate(-61.7655,388.61318)" class="svgplain"><polygon points="483.76,240.02,486.5,242.75,491.83,237.42,489.1,234.68"/><polygon points="478.43,250.82,483.77,245.48,481.03,242.75,475.7,248.08"/><polygon points="491.83,248.08,486.5,242.75,483.77,245.48,489.1,250.82"/><polygon points="475.7,237.42,481.03,242.75,483.76,240.02,478.43,234.68"/><polygon points="483.77,245.48,486.5,242.75,483.76,240.02,481.03,242.75"/><polygon points="483.77,245.48,486.5,242.75,483.76,240.02,481.03,242.75"/></g></g></svg>';
 
 })(window);
