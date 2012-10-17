@@ -687,6 +687,8 @@ if __name__ == "__main__":
         default_host_str = " [%s]" % options.default_host
         if options.default_host == "":
             default_host_str = ""
+        # Set a pre-connection title
+        print("\x1b]0;SSH Connect\007")
         while not validated:
             url = getpass("")
             if bad_chars.match(url):
