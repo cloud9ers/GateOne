@@ -72,9 +72,9 @@ encountered.  Here are the events and their callbacks:
 
 .. _callback_constants:
 
-====================================    ========================================================================
+====================================    ================================================================================
 Callback Constant (ID)                  Called when...
-====================================    ========================================================================
+====================================    ================================================================================
 :attr:`terminal.CALLBACK_SCROLL_UP`     The terminal is scrolled up (back).
 :attr:`terminal.CALLBACK_CHANGED`       The screen is changed/updated.
 :attr:`terminal.CALLBACK_CURSOR_POS`    The cursor position changes.
@@ -83,7 +83,8 @@ Callback Constant (ID)                  Called when...
 :attr:`terminal.CALLBACK_BELL`          The bell character (^G) is encountered.
 :attr:`terminal.CALLBACK_OPT`           The special optional escape sequence is encountered.
 :attr:`terminal.CALLBACK_MODE`          The terminal mode setting changes (e.g. use alternate screen buffer).
-====================================    ========================================================================
+:attr:`terminal.CALLBACK_MESSAGE`       The terminal needs to send the user a message (without messing with the screen).
+====================================    ================================================================================
 
 Note that CALLBACK_DSR is special in that it in most cases it will be called with arguments.  See the code for examples of how and when this happens.
 
@@ -145,10 +146,10 @@ Class Docstrings
 """
 
 # Import stdlib stuff
-import re, logging, base64, StringIO, codecs, unicodedata, tempfile
+import os, re, logging, base64, StringIO, codecs, unicodedata, tempfile
 from array import array
 from datetime import datetime, timedelta
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from itertools import imap, izip
 
 # Inernationalization support
@@ -184,6 +185,10 @@ CALLBACK_OPT = 8 # Called when we encounter the optional ESC sequence
 CALLBACK_MODE = 9 # Called when the terminal mode changes (e.g. DECCKM)
 CALLBACK_RESET = 10 # Called when a terminal reset (^[[!p) is encountered
 CALLBACK_LEDS = 11 # Called when the state of the LEDs changes
+# Called when the terminal emulator encounters a situation where it wants to
+# tell the user about something (say, an error decoding an image) without
+# interfering with the terminal's screen.
+CALLBACK_MESSAGE = 12
 
 # These are for HTML output:
 RENDITION_CLASSES = defaultdict(lambda: None, {
@@ -594,6 +599,361 @@ def pua_counter():
             else:
                 n += 1
 
+# Classes
+class FileType(object):
+    """
+    An object to hold the attributes of a supported file capture/output type.
+    """
+    def __init__(self,
+        name, mimetype, re_header, re_capture, suffix="", path="", linkpath="", icondir=None):
+        """
+        **name:** Name of the file type.
+        **mimetype:** Mime type of the file.
+        **re_header:** The regex to match the start of the file.
+        **re_capture:** The regex to carve the file out of the stream.
+        **suffix:** (optional) The suffix to be appended to the end of the filename (if one is generated).
+        **path:** (optional) The path to a file or directory where the file should be stored.  If *path* is a directory a random filename will be chosen.
+        **linkpath:** (optional) The path to use when generating a link in HTML output.
+        **icondir:** (optional) A path to look for a relevant icon to display when generating HTML output.
+        """
+        self.name = name
+        self.mimetype = mimetype
+        self.re_header = re_header
+        self.re_capture = re_capture
+        self.suffix = suffix
+        # A path just in case something needs to access it outside of Python:
+        self.path = path
+        self.linkpath = linkpath
+        self.icondir = icondir
+        self.file_obj = None
+
+    def __repr__(self):
+        return "<%s>" % self.name
+
+    def __str__(self):
+        "Override if the defined file type warrants a text-based output."
+        return self.__repr__()
+
+    def __del__(self):
+        """
+        Make sure that self.file_obj gets closed/deleted.
+        """
+        logging.debug("FileType __del__(): Closing temp file")
+        self.file_obj.close() # Ensures it gets deleted
+
+    def raw(self):
+        self.file_obj.seek(0)
+        data = open(self.file_obj).read()
+        self.file_obj.seek(0)
+        return data
+
+    def html(self):
+        """
+        Returns the object as an HTML-formatted string.  Must be overridden.
+        """
+        raise NotImplementedError
+
+    def capture(self, data, term_instance=None):
+        """
+        Stores *data* as a temporary file and returns that file's object.
+        *term_instance* can be used by overrides of this function to make
+        adjustments to the terminal emulator after the *data* is captured e.g.
+        to make room for an image.
+        """
+        # Remove the extra \r's that the terminal adds:
+        data = str(data).replace('\r\n', '\n')
+        logging.debug("capture() len(data): %s" % len(data))
+        # Write the data to disk in a temporary location
+        self.file_obj = tempfile.TemporaryFile()
+        self.file_obj.write(data)
+        self.file_obj.flush()
+        # Leave it open
+        return self.file_obj
+
+    def close(self):
+        """
+        Closes :attr:`self.file_obj`
+        """
+        self.file_obj.close()
+
+class ImageFile(FileType):
+    """
+    A subclass of :class:`FileType` for images (specifically to override
+    :meth:`self.html` and :meth:`self.capture`).
+    """
+    def capture(self, data, term_instance):
+        """
+        Captures the image contained within *data*.  Will use *term_instance*
+        to make room for the image in the terminal screen.
+
+        .. note::  Unlike :class:`FileType`, *term_instance* is mandatory.
+        """
+        logging.debug('ImageFile.capture()')
+        # Image file formats don't usually like carriage returns:
+        data = str(data).replace('\r\n', '\n')
+        if Image: # PIL is loaded--try to guess how many lines the image takes
+            i = StringIO.StringIO(data)
+            try:
+                im = Image.open(i)
+            except IOError:
+                # i.e. PIL couldn't identify the file
+                logging.error("PIL couldn't process the image")
+                return # Don't do anything--bad image
+        else: # No PIL means no images.  Don't bother wasting memory.
+            return
+        # Resize the image to be small enough to fit within a typical terminal
+        if im.size[0] > 640 or im.size[1] > 480:
+            im.thumbnail((640, 480), Image.ANTIALIAS)
+        # Get the current image location and reference so we can move it around
+        img_Y = term_instance.cursorY
+        img_X = term_instance.cursorX
+        ref = term_instance.screen[img_Y][img_X]
+        if term_instance.em_dimensions:
+            # Make sure the image will fit properly in the screen
+            width = im.size[0]
+            height = im.size[1]
+            if height <= term_instance.em_dimensions['height']:
+                # Fits within a line.  No need for a newline
+                num_chars = int(width/term_instance.em_dimensions['width'])
+                # Move the cursor an equivalent number of characters
+                term_instance.cursor_right(num_chars)
+            else:
+                # We're going to move the image so clear out the current spot
+                term_instance.screen[img_Y][img_X] = u' '
+                # This is how many newlines the image represents:
+                newlines = int(height/term_instance.em_dimensions['height'])
+                term_instance.cursorX = 0
+                term_instance.newline() # Start with a newline
+                if newlines > term_instance.cursorY:
+                    for line in xrange(newlines):
+                        term_instance.newline()
+                # Save the new image location
+                term_instance.screen[
+                    term_instance.cursorY][term_instance.cursorX] = ref
+                term_instance.newline()
+        else:
+            term_instance.screen[img_Y][img_X] = u' ' # We're going to move it
+            # No way to calculate the number of lines the image will take
+            term_instance.cursorY = term_instance.rows - 1 # Move to the end of the screen
+            # ... so it doesn't get cut off at the top
+            # Save the new image location
+            term_instance.screen[
+                term_instance.cursorY][term_instance.cursorX] = ref
+            term_instance.newline() # Make some space at the bottom too just in case
+            term_instance.newline()
+        # Write the captured image to disk
+        if self.path:
+            if os.path.exists(self.path):
+                if os.path.isdir(self.path):
+                    # Assume that a path was given for a reason and use a
+                    # NamedTemporaryFile instead of TemporaryFile.
+                    self.file_obj = tempfile.NamedTemporaryFile(
+                        suffix=self.suffix, dir=self.path)
+                    # Update self.path to use the new, actual file path
+                    self.path = self.file_obj.name
+                else:
+                    self.file_obj = open(self.path, 'rb+')
+        else:
+            self.file_obj = tempfile.TemporaryFile()
+        im.save(self.file_obj, im.format)
+        self.file_obj.flush()
+        self.file_obj.seek(0) # Go back to the start
+        return self.file_obj
+
+    def html(self):
+        """
+        Returns :attr:`self.file_obj` as an <img> tag with the src set to a
+        data::URI.
+        """
+        if not self.file_obj:
+            return u""
+        self.file_obj.seek(0)
+        try:
+            im = Image.open(self.file_obj)
+        except IOError:
+            # i.e. PIL couldn't identify the file
+            return u"<i>Error displaying image</i>"
+        self.file_obj.seek(0)
+        # Need to encode base64 to create a data URI
+        encoded = base64.b64encode(self.file_obj.read())
+        data_uri = "data:image/%s;base64,%s" % (
+            im.format.lower(), encoded)
+        return '<img src="%s" width="%s" height="%s">' % (
+            data_uri, im.size[0], im.size[1])
+
+class PNGFile(ImageFile):
+    """
+    An override of :class:`ImageFile` for PNGs to hard-code the name, regular
+    expressions, mimetype, and suffix.
+    """
+    name = "PNG Image"
+    mimetype = "image/png"
+    suffix = ".png"
+    re_header = re.compile('.*\x89PNG\r', re.DOTALL)
+    re_capture = re.compile('\x89PNG\r.+IEND\xaeB`\x82', re.DOTALL)
+    def __init__(self, path="", **kwargs):
+        """
+        **path:** (optional) The path to a file or directory where the file should be stored.  If *path* is a directory a random filename will be chosen.
+        """
+        self.path = path
+        self.file_obj = None
+
+class JPEGFile(ImageFile):
+    """
+    An override of :class:`ImageFile` for JPEGs to hard-code the name, regular
+    expressions, mimetype, and suffix.
+    """
+    name = "JPEG Image"
+    mimetype = "image/jpeg"
+    suffix = ".jpeg"
+    re_header = re.compile(
+        '.*\xff\xd8\xff.+JFIF\x00|.*\xff\xd8\xff.+Exif\x00', re.DOTALL)
+    re_capture = re.compile(
+        '\xff\xd8\xff.+JFIF\x00.*?\xff\xd9|\xff\xd8\xff.+Exif\x00.*?\xff\xd9',
+        re.DOTALL
+    )
+    def __init__(self, path="", **kwargs):
+        """
+        **path:** (optional) The path to a file or directory where the file should be stored.  If *path* is a directory a random filename will be chosen.
+        """
+        self.path = path
+        self.file_obj = None
+
+class PDFFile(FileType):
+    """
+    A subclass of :class:`FileType` for PDFs (specifically to override
+    :meth:`self.html`).  Has hard-coded name, mimetype, suffix, and regular
+    expressions.  This class will also utilize :attr:`self.icondir` to look for
+    an icon named, 'pdf.svg'.  If found it will be utilized by
+    :meth:`self.html` when generating output.
+    """
+    name = "PDF"
+    mimetype = "application/pdf"
+    suffix = ".pdf"
+    re_header = re.compile(r'.*%PDF-[0-9]\.[0-9]{1,2}.+?obj', re.DOTALL)
+    re_capture = re.compile(r'%PDF-[0-9]\.[0-9]{1,2}.+?obj.+%%EOF', re.DOTALL)
+    icon = "pdf.svg" # Name of the file inside of self.icondir
+    def __init__(self, path="", linkpath="", icondir=None):
+        """
+        **path:** (optional) The path to the file.
+        **linkpath:** (optional) The path to use when generating a link in HTML output.
+        **icondir:** (optional) A path to look for a relevant icon to display when generating HTML output.
+        """
+        self.path = path
+        self.linkpath = linkpath
+        self.icondir = icondir
+        self.file_obj = None
+        self.thumbnail = None
+
+    def generate_thumbnail(self):
+        """
+        If available, will use ghostscript (gs) to generate a thumbnail of this
+        PDF in the form of an <img> tag with the src set to a data::URI.
+        """
+        from commands import getstatusoutput
+        thumb = tempfile.NamedTemporaryFile()
+        params = [
+            'gs', # gs must be in your path
+            '-dPDFFitPage',
+            '-dPARANOIDSAFER',
+            '-dBATCH',
+            '-dNOPAUSE',
+            '-dNOPROMPT',
+            '-dMaxBitmap=500000000',
+            '-dAlignToPixels=0',
+            '-dGridFitTT=0',
+            '-dDEVICEWIDTH=90',
+            '-dDEVICEHEIGHT=120',
+            '-dORIENT1=true',
+            '-sDEVICE=jpeg',
+            '-dTextAlphaBits=4',
+            '-dGraphicsAlphaBits=4',
+            '-sOutputFile=%s' % thumb.name,
+            self.path
+        ]
+        retcode, output = getstatusoutput(" ".join(params))
+        if retcode == 0:
+            # Success
+            data = None
+            with open(thumb.name) as f:
+                data = f.read()
+            thumb.close() # Make sure it gets removed now we've read it
+            if data:
+                encoded = base64.b64encode(data)
+                data_uri = "data:image/jpeg;base64,%s" % encoded
+                return '<img src="%s">' % data_uri
+
+    def capture(self, data, term_instance):
+        """
+        Stores *data* as a temporary file and returns that file's object.
+        *term_instance* can be used by overrides of this function to make
+        adjustments to the terminal emulator after the *data* is captured e.g.
+        to make room for an image.
+        """
+        # Remove the extra \r's that the terminal adds:
+        data = str(data).replace('\r\n', '\n')
+        logging.debug("capture() len(data): %s" % len(data))
+        # Write the data to disk in a temporary location
+        if self.path:
+            if os.path.exists(self.path):
+                if os.path.isdir(self.path):
+                    # Assume that a path was given for a reason and use a
+                    # NamedTemporaryFile instead of TemporaryFile.
+                    self.file_obj = tempfile.NamedTemporaryFile(
+                        suffix=self.suffix, dir=self.path)
+                    # Update self.path to use the new, actual file path
+                    self.path = self.file_obj.name
+                else:
+                    self.file_obj = open(self.path, 'rb+')
+        else:
+            # Use the terminal emulator's temppath
+            self.file_obj = tempfile.NamedTemporaryFile(
+                suffix=self.suffix, dir=term_instance.temppath)
+            self.path = self.file_obj.name
+        self.file_obj.write(data)
+        self.file_obj.flush()
+        # Ghostscript-based thumbnail generation disabled due to its slow,
+        # blocking nature.  Works great though!
+        #self.thumbnail = self.generate_thumbnail()
+        # TODO: Figure out a way to do non-blocking thumbnail generation
+        if self.icondir:
+            pdf_icon = os.path.join(self.icondir, self.icon)
+            if os.path.exists(pdf_icon):
+                with open(pdf_icon) as f:
+                    self.thumbnail = f.read()
+        if self.thumbnail:
+            # Make room for our link
+            img_Y = term_instance.cursorY
+            img_X = term_instance.cursorX
+            ref = term_instance.screen[img_Y][img_X]
+            term_instance.screen[img_Y][img_X] = u' ' # We're going to move it
+            if term_instance.cursorY < 8: # Icons are about ~8 newlines high
+                for line in xrange(8 - term_instance.cursorY):
+                    term_instance.newline()
+            # Save the new location
+            term_instance.screen[
+                term_instance.cursorY][term_instance.cursorX] = ref
+            term_instance.newline()
+        # Leave it open
+        return self.file_obj
+
+    def html(self):
+        """
+        Returns a link to download the PDF using :attr:`self.linkpath` for the
+        href attribute.
+        """
+        link = "%s/%s" % (self.linkpath, os.path.split(self.path)[1])
+        return ('<a target="_blank" href="%s">%s</a><br>'
+                '   <a href="%s">PDF Document</a>'
+                % (link, self.thumbnail, link))
+
+class NotFoundError(Exception):
+    """
+    Raised by :meth:`Terminal.remove_magic` if a given filetype was not found in
+    :attr:`Terminal.supported_magic`.
+    """
+    pass
+
 class Terminal(object):
     """
     Terminal controller class.
@@ -661,7 +1021,8 @@ class Terminal(object):
     RE_OPT_SEQ = re.compile(r'\x1b\]_\;(.+?)(\x07|\x1b\\)')
     RE_NUMBERS = re.compile('\d*') # Matches any number
 
-    def __init__(self, rows=24, cols=80, em_dimensions=None, debug=False):
+    def __init__(self, rows=24, cols=80, em_dimensions=None, temppath='/tmp',
+        linkpath='/tmp', icondir=None, debug=False):
         """
         Initializes the terminal by calling *self.initialize(rows, cols)*.  This
         is so we can have an equivalent function in situations where __init__()
@@ -674,11 +1035,50 @@ class Terminal(object):
 
             {'height': <px>, 'width': <px>}
 
+        The *temppath* will be used to store files that are captured/saved by
+        the terminal emulator.  In conjunction with this is the *linkpath* which
+        will be used when creating links to these temporary files.  For example,
+        a web-based application may wish to have the terminal emulator store
+        temporary files in /tmp but give clients a completely unrelated URL to
+        retrieve these files (for security or convenience reasons).  Here's a
+        real world example of how it works::
+
+            >> term = Terminal(rows=10, cols=40, temppath='/var/tmp', linkpath='/terminal')
+            >> term.write('About to write a PDF...\n')
+            >> pdf = open('/path/to/somefile.pdf').read()
+            >> term.write(pdf)
+            >> term.dump_html()
+            ([],
+            [u'About to write a PDF...                 ',
+            # <unnecessary lines of whitespace have been removed for this example>
+            u'<a target="_blank" href="/terminal/tmpZoOKVM.pdf">PDF Document</a>']
+
+        The PDF file in question will reside in `/var/tmp` but the link was
+        created as `href="/terminal/tmpZoOKVM.pdf"`.  As long as your web app
+        knows to look in /var/tmp for incoming '/terminal' requests users should
+        be able to retrieve their documents.
+
+            http://yourapp.company.com/terminal/tmpZoOKVM.pdf
+
+        The *icondir* parameter, if given, will be used to provide a relevant
+        icon when outputing a link to a file.  When a supported
+        :class:`FileType` is captured the instance will be given the *icondir*
+        as a parameter in a manner similar to this::
+
+            filetype_instance = filetype_class(icondir=self.icondir)
+
+        That way when filetype_instance.html() is called it can display a nice
+        icon to the user...  if that particular :class:`FileType` supports icons
+        and the icon it is looking for happens to be available at *icondir*.
+
         If *debug* is True, the root logger will have its level set to DEBUG.
         """
         if debug:
             logger = logging.getLogger()
             logger.level = logging.DEBUG
+        self.temppath = temppath
+        self.linkpath = linkpath
+        self.icondir = icondir
         self.initialize(rows, cols, em_dimensions)
 
     def initialize(self, rows=24, cols=80, em_dimensions=None):
@@ -695,6 +1095,7 @@ class Terminal(object):
         # determine if anything has changed since the last dump*()
         self.modified = False
         self.local_echo = True
+        self.insert_mode = False
         self.esc_buffer = '' # For holding escape sequences as they're typed.
         self.show_cursor = True
         self.cursor_home = 0
@@ -708,7 +1109,7 @@ class Terminal(object):
         # Set the default window margins
         self.top_margin = 0
         self.bottom_margin = self.rows - 1
-        self.timeout_image = None
+        self.timeout_capture = None
         self.specials = {
             self.ASCII_NUL: self.__ignore,
             self.ASCII_BEL: self.bell,
@@ -848,6 +1249,7 @@ class Terminal(object):
             CALLBACK_MODE: {},
             CALLBACK_RESET: {},
             CALLBACK_LEDS: {},
+            CALLBACK_MESSAGE: {},
         }
         self.leds = {
             1: False,
@@ -855,21 +1257,24 @@ class Terminal(object):
             3: False,
             4: False
         }
-        png_header = re.compile('.*\x89PNG\r', re.DOTALL)
-        png_whole = re.compile('\x89PNG\r.+IEND\xaeB`\x82', re.DOTALL)
-        # NOTE: Only matching JFIF and Exif JPEGs because "\xff\xd8" is too
-        # ambiguous.
-        jpeg_header = re.compile('.*\xff\xd8\xff.+JFIF\x00|.*\xff\xd8\xff.+Exif\x00', re.DOTALL)
-        jpeg_whole = re.compile(
-            '\xff\xd8\xff.+JFIF\x00.*?\xff\xd9|\xff\xd8\xff.+Exif\x00.*?\xff\xd9', re.DOTALL)
-        self.magic = {
-            # Dict for magic "numbers" so we can tell when a particular type of
-            # file begins and ends (so we can capture it in binary form and
-            # later dump it out via dump_html())
-            # The format is 'beginning': 'whole'
-            png_header: png_whole,
-            jpeg_header: jpeg_whole,
-        }
+        # supported_magic gets assigned via self.add_magic() below
+        self.supported_magic = []
+        # Dict for magic "numbers" so we can tell when a particular type of
+        # file begins and ends (so we can capture it in binary form and
+        # later dump it out via dump_html())
+        # The format is 'beginning': 'whole'
+        self.magic = OrderedDict()
+        # magic_map is like magic except it is in the format of:
+        #   'beginning': <filetype class>
+        self.magic_map = {}
+        # Supported magic (defaults)
+        self.add_magic(PDFFile)
+        self.add_magic(PNGFile)
+        self.add_magic(JPEGFile)
+        # NOTE:  The order matters!  Some file formats are containers that can
+        # hold other file formats.  For example, PDFs can contain JPEGs.  So if
+        # we match JPEGs before PDFs we might make a match when we really wanted
+        # to match the overall container (the PDF).
         self.matched_header = None
         # These are for saving self.screen and self.renditions so we can support
         # an "alternate buffer"
@@ -882,9 +1287,9 @@ class Terminal(object):
         self.saved_cursorY = 0
         self.saved_rendition = [None]
         self.application_keys = False
-        self.image = ""
-        self.images = {}
-        self.image_counter = pua_counter()
+        self.capture = ""
+        self.captured_files = {}
+        self.file_counter = pua_counter()
         # This is for creating a new point of reference every time there's a new
         # unique rendition at a given coordinate
         self.rend_counter = unicode_counter()
@@ -896,7 +1301,55 @@ class Terminal(object):
         self.prev_dump = [] # A cache to speed things up
         self.prev_dump_rend = [] # Ditto
         self.html_cache = [] # Ditto
-        self.watcher = None # Placeholder for the image watcher thread (if used)
+        self.watcher = None # Placeholder for the file watcher thread (if used)
+
+    def add_magic(self, filetype):
+        """
+        Adds the given *filetype* to :attr:`self.supported_magic` and generates
+        the necessary bits in :attr:`self.magic` and
+        :attr:`self.magic_map`.
+
+        *filetype* is expected to be a subclass of :class:`FileType`.
+        """
+        if filetype in self.supported_magic:
+            return # Nothing to do; it's already there
+        self.supported_magic.append(filetype)
+        # Wand ready...
+        for Magic in self.supported_magic:
+            self.magic.update({Magic.re_header: Magic.re_capture})
+        # magic_map is just a convenient way of performing magic, er, I
+        # mean referencing filetypes that match the supported magic numbers.
+        self.magic_map = {}
+        for Magic in self.supported_magic:
+            self.magic_map.update({Magic.re_header: Magic})
+
+    def remove_magic(self, filetype):
+        """
+        Removes the given *filetype* from :attr:`self.supported_magic`,
+        :attr:`self.magic`, and :attr:`self.magic_map`.
+
+        *filetype* may be the specific filetype class or a string that can be
+        either a filetype.name or filetype.mimetype.
+        """
+        found = None
+        if isinstance(filetype, basestring):
+            for Type in self.supported_magic:
+                if Type.name == filetype:
+                    found = Type
+                    break
+                elif Type.mimetype == filetype:
+                    found = Type
+                    break
+        else:
+            for Type in self.supported_magic:
+                if Type == filetype:
+                    found = Type
+                    break
+        if not found:
+            raise NotFoundError("%s not found in supported magic" % filetype)
+        self.supported_magic.remove(Type)
+        del self.magic[Type.re_header]
+        del self.magic_map[Type.re_header]
 
     def init_screen(self):
         """
@@ -933,7 +1386,6 @@ class Terminal(object):
         Empties the scrollback buffers (:attr:`self.scrollback_buf` and
         :attr:`self.scrollback_renditions`).
         """
-        # Close any image files that might be associated with characters
         self.scrollback_buf = []
         self.scrollback_renditions = []
 
@@ -1001,6 +1453,7 @@ class Terminal(object):
         self.title = "Gate One"
         self.esc_buffer = ''
         self.show_cursor = True
+        self.insert_mode = False
         self.rendition_set = False
         self.current_charset = 0
         self.set_G0_charset('B')
@@ -1306,46 +1759,55 @@ class Terminal(object):
         cursor_right = self.cursor_right
         magic = self.magic
         changed = False
-        logging.debug('handling chars: %s' % repr(chars))
+        #logging.debug('handling chars: %s' % repr(chars))
         if special_checks:
-            # NOTE: Special checks are limited to PNGs and JPEGs right now
             before_chars = ""
             after_chars = ""
-            for magic_header in magic.keys():
-                try:
-                    if magic_header.match(str(chars)):
-                        self.matched_header = magic_header
-                        self.timeout_image = datetime.now()
-                except UnicodeEncodeError:
-                    # Gibberish; drop it and pretend it never happened
-                    self.esc_buffer = ""
-                    # Make it so it won't barf
-                    chars = chars.encode('UTF-8', 'ignore')
-            if self.image or self.matched_header:
-                self.image += chars
-                match = magic[self.matched_header].search(self.image)
+            if not self.capture:
+                for magic_header in magic:
+                    try:
+                        if magic_header.match(str(chars)):
+                            self.matched_header = magic_header
+                            self.capture_regex = magic[self.matched_header]
+                            self.timeout_capture = datetime.now()
+                            break
+                    except UnicodeEncodeError:
+                        # Gibberish; drop it and pretend it never happened
+                        self.esc_buffer = ""
+                        # Make it so it won't barf below
+                        chars = chars.encode('UTF-8', 'ignore')
+            if self.capture or self.matched_header:
+                self.capture += chars
+                match = self.capture_regex.search(self.capture)
                 if match:
-                    #logging.debug("Matched image format.  Capturing...")
-                    before_chars, after_chars = magic[
-                            self.matched_header].split(self.image)
-                    # Eliminate anything before the match
-                    self.image = match.group()
-                    self._capture_image()
-                    self.image = "" # Empty it now that is is captured
-                    self.matched_header = None # Ditto
-                if before_chars:
-                    self.write(before_chars, special_checks=False)
+                    logging.debug(
+                        "Matched %s format.  Capturing..." %
+                        self.magic_map[self.matched_header].name)
+                    before_chars, after_chars = self.capture_regex.split(
+                        self.capture)
                 if after_chars:
+                    if len(after_chars) > 300:
+                        # Could be more to this file.  Let's wait until output
+                        # slows down before attempting to perform a match
+                        if len(after_chars) > 5368709120: # 5Mb
+                            # This is just too big for us to capture.  Discard
+                            self.capture = ""
+                            self.matched_header = None
+                            after_chars = ""
+                            # TODO: "Ignore for X seconds" logic
+                        else:
+                            return
+                    else:
+                        # Perform the capture and start anew
+                        self.capture = match.group()
+                        self._capture_file()
+                        self.capture = "" # Empty it now that is is captured
+                        self.matched_header = None # Ditto
+                        if before_chars:
+                            self.write(before_chars, special_checks=False)
                     self.write(after_chars, special_checks=False)
-                # If we haven't got a complete image after one second something
-                # went wrong.  Discard what we've got and restart.
-                one_second = timedelta(seconds=1)
-                if datetime.now() - self.timeout_image > one_second:
-                    self.image = "" # Empty it
-                    self.matched_header = None
-                    chars = _("Failed to decode image.  Buffer discarded.")
-                else:
                     return
+                return
         # Have to convert to unicode
         try:
             chars = chars.decode('utf-8', "handle_special")
@@ -1414,15 +1876,25 @@ class Terminal(object):
                     continue # We're done here
                 changed = True
                 if self.cursorX >= self.cols:
-                    if self.autowrap:
-                        self.cursorX = 0
-                        self.newline()
-                    else:
-                        self.screen[self.cursorY].append(u' ') # Make room
-                        self.renditions[self.cursorY].append(u' ')
+                    # Non-autowrap has been disabled due to issues with browser
+                    # wrapping.
+                    #if self.autowrap:
+                    self.cursorX = 0
+                    self.newline()
+                    #else:
+                        #self.screen[self.cursorY].append(u' ') # Make room
+                        #self.renditions[self.cursorY].append(u' ')
                 try:
                     self.renditions[self.cursorY][
                         self.cursorX] = self.cur_rendition
+                    if self.insert_mode:
+                        # Insert mode dictates that we move everything to the
+                        # right for every character we insert.  Normally the
+                        # program itself will take care of this but older
+                        # programs and shells will simply set call ESC[4h,
+                        # insert the character, then call ESC[4i to return the
+                        # terminal to its regular state.
+                        self.insert_characters(1)
                     if charnum in self.charset:
                         char = self.charset[charnum]
                         self.screen[self.cursorY][self.cursorX] = char
@@ -1483,6 +1955,8 @@ class Terminal(object):
         .. note:: This will only scroll up the region within self.top_margin and self.bottom_margin (if set).
         """
         #logging.debug("scroll_up(%s)" % n)
+        empty_line = array('u', u' ' * self.cols) # Line full of spaces
+        empty_rend = array('u', unichr(1000) * self.cols)
         for x in xrange(int(n)):
             line = self.screen.pop(self.top_margin) # Remove the top line
             self.scrollback_buf.append(line) # Add it to the scrollback buffer
@@ -1491,15 +1965,13 @@ class Terminal(object):
                 self.init_scrollback()
                 # NOTE:  This would only be if 1000 lines piled up before the
                 # next dump_html() or dump().
-            empty_line = array('u', u' ' * self.cols) # Line full of spaces
             # Add it to the bottom of the window:
-            self.screen.insert(self.bottom_margin, empty_line)
+            self.screen.insert(self.bottom_margin, empty_line[:]) # A copy
             # Remove top line's rendition information
             rend = self.renditions.pop(self.top_margin)
             self.scrollback_renditions.append(rend)
             # Insert a new empty rendition as well:
-            empty_line = array('u', unichr(1000) * self.cols)
-            self.renditions.insert(self.bottom_margin, empty_line)
+            self.renditions.insert(self.bottom_margin, empty_rend[:])
         # Execute our callback indicating lines have been updated
         try:
             for callback in self.callbacks[CALLBACK_CHANGED].values():
@@ -1673,13 +2145,13 @@ class Terminal(object):
         Executes a carriage return (sets :attr:`self.cursorX` to 0).  In other
         words it moves the cursor back to position 0 on the line.
         """
-        if self.cursorX >= self.cols:
-            if self.screen[self.cursorY][self.cursorX-1] == u' ':
-                # This is just the underlying program telling us to wrap
-                # Let the browser do it for us.
-                # NOTE: I know this assumes HTML output.  Deal with it :P
-                return
-        self.cursorX = 0 # Yeah this is redundant if newline() is called.
+        # This autowrap magic stuff doesn't work so well so autowrap is now
+        # explicit until I figure out a way to differentiate between the type of
+        # long line output by something like 'ps axwww' and the type that gets
+        # output by, say, bash when you type a really long command.
+        #if self.cursorX >= self.cols and self.cursorX != self.cols:
+            #self.newline()
+        self.cursorX = 0 # Yeah this is redundant if newline() is called
 
     def _xon(self):
         """
@@ -1733,108 +2205,67 @@ class Terminal(object):
     def _csi(self):
         """
         Marks the start of a CSI escape sequence (which is itself a character)
-        by setting :attr:`self.esc_buffer` to '\\\\x1b[' (which is the CSI escape
-        sequence).
+        by setting :attr:`self.esc_buffer` to '\\\\x1b[' (which is the CSI
+        escape sequence).
         """
         self.esc_buffer = '\x1b['
 
-    def _capture_image(self):
+    def _capture_file(self):
         """
-        This gets called when an image (PNG or JPEG) was detected by
-        :meth:`Terminal.write` and captured in :attr:`self.image`.  It cleans up
-        the data inside :attr:`self.image` (getting rid of carriage returns) and
-        stores a reference to self.image as a single character (using
-        :attr:`self.image_counter`) in :attr:`self.screen` at the current cursor
-        position.  The actual image will be written to disk and read on-demand
-        by :meth:`self__spanify_screen` when it needs to be displayed.  The
-        image on disk will be automatically removed  when it is no longer
-        visible.
-
-        It also moves the cursor to the beginning of the last line before doing
-        this in order to ensure that the captured image stays within the
-        browser's current window.
-
-        .. note:: The :meth:`Terminal._spanify_screen` function is aware of this logic and knows that a 'character' in Plane 16 of the Unicode PUA indicates the presence of something like an image that needs special processing.
+        This function gets called by :meth:`Terminal.write` when the incoming
+        character stream matches a value in :attr:`self.magic`.  It will call
+        whatever function is associated with the matching regex in
+        :attr:`self.magic_map`.
         """
-        # Remove the extra \r's that the terminal adds:
-        self.image = str(self.image).replace('\r\n', '\n')
-        logging.debug("_capture_image() len(self.image): %s" % len(self.image))
-        if Image: # PIL is loaded--try to guess how many lines the image takes
-            i = StringIO.StringIO(self.image)
-            try:
-                im = Image.open(i)
-            except IOError:
-                # i.e. PIL couldn't identify the file
-                return # Don't do anything--bad image
-        else: # No PIL means no images.  Don't bother wasting memory.
-            return
-        ref = self.image_counter.next()
-        if self.em_dimensions:
-            # Make sure the image will fit properly in the screen
-            width = im.size[0]
-            height = im.size[1]
-            if height <= self.em_dimensions['height']:
-                # Fits within a line.  No need for a newline
-                num_chars = int(width/self.em_dimensions['width'])
-                # Put the image at the current cursor location
+        logging.debug("_capture_file()")
+        for magic_header in self.magic.keys():
+            if magic_header.match(self.capture):
+                # Create a reference point we can use to retrieve the file later
+                ref = self.file_counter.next()
+                # Before doing anything else we need to mark the current cursor
+                # location as belonging to our file
                 self.screen[self.cursorY][self.cursorX] = ref
-                # Move the cursor an equivalent number of characters
-                self.cursor_right(num_chars)
-            else:
-                newlines = int(height/self.em_dimensions['height'])
-                self.cursorX = 0
-                newlines = abs(self.cursorY - newlines)
-                self.newline() # Start with a newline for good measure... For
-                # Some reason it seems to look better that way.
-                if newlines > self.cursorY:
-                    for line in xrange(newlines):
-                        self.newline()
-                self.screen[self.cursorY][self.cursorX] = ref
-                self.newline()
-        else:
-            # No way to calculate the number of lines the image will take
-            self.cursorY = self.rows - 1 # Move to the end of the screen
-            # ... so it doesn't get cut off at the top
-            self.screen[self.cursorY][self.cursorX] = ref
-            self.newline() # Make some space at the bottom too just in case
-            self.newline()
-        # Write the image to disk in a temporary location
-        self.images[ref] = tempfile.TemporaryFile()
-        im.save(self.images[ref], im.format)
-        self.images[ref].flush()
-        # Start up the image watcher thread so leftover FDs get closed when
-        # they're no longer being used
-        if not self.watcher or not self.watcher.isAlive():
-            import threading
-            self.watcher = threading.Thread(
-                name='watcher', target=self._image_fd_watcher)
-            self.watcher.setDaemon(True)
-            self.watcher.start()
+                # Create an instance of the filetype we can reference
+                filetype_instance = self.magic_map[magic_header](
+                    path=self.temppath,
+                    linkpath=self.linkpath,
+                    icondir=self.icondir)
+                filetype_instance.capture(self.capture, self)
+                self.captured_files[ref] = filetype_instance
+                # Start up an open file watcher so leftover file objects get
+                # closed when they're no longer being used
+                if not self.watcher or not self.watcher.isAlive():
+                    import threading
+                    self.watcher = threading.Thread(
+                        name='watcher', target=self._captured_fd_watcher)
+                    self.watcher.setDaemon(True)
+                    self.watcher.start()
+                return
 
-    def _image_fd_watcher(self):
+    def _captured_fd_watcher(self):
         """
-        Meant to be run inside of a thread, calls close_image_fds() until there
+        Meant to be run inside of a thread, calls close_captured_fds() until there
         are no more open image file descriptors.
         """
         logging.debug("starting image_fd_watcher()")
         import time
         quitting = False
         while not quitting:
-            if self.images:
-                self.close_image_fds()
+            if self.captured_files:
+                self.close_captured_fds()
                 time.sleep(5)
             else:
                 quitting = True
         logging.debug('image_fd_watcher() quitting: No more images.')
 
-    def close_image_fds(self):
+    def close_captured_fds(self):
         """
-        Closes the file descriptors of any images that are no longer on the
-        screen.
+        Closes the file descriptors of any captured files that are no longer on
+        the screen.
         """
-        #logging.debug('close_image_fds()') # Commented because it's kinda noisy
-        if self.images:
-            for ref in self.images.keys():
+        #logging.debug('close_captured_fds()') # Commented because it's kinda noisy
+        if self.captured_files:
+            for ref in self.captured_files.keys():
                 found = False
                 for line in self.screen:
                     if ref in line:
@@ -1846,8 +2277,8 @@ class Terminal(object):
                             found = True
                             break
                 if not found:
-                    self.images[ref].close()
-                    del self.images[ref]
+                    #self.captured_files[ref].close()
+                    del self.captured_files[ref]
 
     def _string_terminator(self):
         """
@@ -2023,18 +2454,28 @@ class Terminal(object):
         # * 6: Origin mode
         # * 7: Wraparound mode
         logging.debug("set_expanded_mode(%s)" % setting)
-        setting = setting[1:] # Don't need the ?
-        settings = setting.split(';')
-        for setting in settings:
+        if setting.startswith('?'):
+            # DEC Private Mode Set
+            setting = setting[1:] # Don't need the ?
+            settings = setting.split(';')
+            for setting in settings:
+                try:
+                    self.expanded_modes[setting](True)
+                except (KeyError, TypeError):
+                    pass # Unsupported expanded mode
             try:
-                self.expanded_modes[setting](True)
-            except (KeyError, TypeError):
-                pass # Unsupported expanded mode
-        try:
-            for callback in self.callbacks[CALLBACK_MODE].values():
-                callback(setting, True)
-        except TypeError:
-            pass
+                for callback in self.callbacks[CALLBACK_MODE].values():
+                    callback(setting, True)
+            except TypeError:
+                pass
+        else:
+            # There's a couple mode settings that are just "[Nh" where N==number
+            # [2h Keyboard Action Mode (AM)
+            # [4h Insert Mode
+            # [12h Send/Receive Mode (SRM)
+            # [24h Automatic Newline (LNM)
+            if setting == '4':
+                self.insert_mode = True
 
     def reset_expanded_mode(self, setting):
         """
@@ -2042,18 +2483,28 @@ class Terminal(object):
         cursor.
         """
         logging.debug("reset_expanded_mode(%s)" % setting)
-        setting = setting[1:] # Don't need the ?
-        settings = setting.split(';')
-        for setting in settings:
+        if setting.startswith('?'):
+            setting = setting[1:] # Don't need the ?
+            settings = setting.split(';')
+            for setting in settings:
+                try:
+                    self.expanded_modes[setting](False)
+                except (KeyError, TypeError):
+                    pass # Unsupported expanded mode
             try:
-                self.expanded_modes[setting](False)
-            except (KeyError, TypeError):
-                pass # Unsupported expanded mode
-        try:
-            for callback in self.callbacks[CALLBACK_MODE].values():
-                callback(setting, False)
-        except TypeError:
-            pass
+                for callback in self.callbacks[CALLBACK_MODE].values():
+                    callback(setting, False)
+            except TypeError:
+                pass
+        else:
+            # There's a couple mode settings that are just "[Nh" where N==number
+            # [2h Keyboard Action Mode (AM)
+            # [4h Insert Mode
+            # [12h Send/Receive Mode (SRM)
+            # [24h Automatic Newline (LNM)
+            # The only one we care about is 4 (insert mode)
+            if setting == '4':
+                self.insert_mode = False
 
     def set_application_mode(self, boolean):
         """
@@ -2111,7 +2562,7 @@ class Terminal(object):
 
     def toggle_autowrap(self, boolean):
         """
-        Sets :attr:`self.autowrap equal to *boolean*.  Literally:
+        Sets :attr:`self.autowrap` equal to *boolean*.  Literally:
 
         .. code-block:: python
 
@@ -2638,6 +3089,19 @@ class Terminal(object):
             # High likelyhood that nothing is defined.  No biggie.
             pass
 
+    def _captured_file_output(self, captured_file):
+        """
+        Called by :meth:`self._spanify_screen` and
+        :meth:`self._spanify_scrollback`, returns an HTML-formatted string
+        containing the data stored in *captured_file* in a way that's suitable
+        for display in a terminal.
+
+        Raises a HTMLEncodeError exception if a problem is encountered while
+        converting the file data.
+
+        Example: It will convert PNG and JPEG images into data::URI <IMG> tags.
+        """
+
     def _spanify_screen(self):
         """
         Iterates over the lines in *screen* and *renditions*, applying HTML
@@ -2688,45 +3152,7 @@ class Terminal(object):
                 rend = renditions_store[rend] # Get actual rendition
                 if ord(char) >= special: # Special stuff =)
                     # Obviously, not really a single character
-                    if not Image: # Can't use images in the terminal
-                        outline += "<i>Image file</i>"
-                        continue # Can't do anything else
-                    image_file = self.images[char]
-                    image_file.seek(0) # Back to the start
-                    image_data = image_file.read()
-                    # PIL likes StringIO objects for some reason
-                    i = StringIO.StringIO(image_data)
-                    try:
-                        im = Image.open(i)
-                    except IOError:
-                        # i.e. PIL couldn't identify the file
-                        outline += "<i>Image file</i>"
-                        continue # Can't do anything else
-                    # TODO: Make these sizes adjustable:
-                    if im.size[0] > 640 or im.size[1] > 480:
-                        # Probably too big to send to browser as a data URI.
-                        if im: # Resize it...
-                            # 640x480 should come in <32k for most stuff
-                            try:
-                                im.thumbnail((640, 480), Image.ANTIALIAS)
-                                im.save(image_file, im.format)
-                                # Re-read it in
-                                image_file.seek(0)
-                                image_data = image_file.read()
-                            except IOError:
-                                # Sometimes PIL will throw this if it can't read
-                                # the image.
-                                outline += "<i>Problem displaying this image</i>"
-                                continue
-                        else: # Generic error
-                            outline += "<i>Problem displaying this image</i>"
-                            continue
-                    # Need to encode base64 to create a data URI
-                    encoded = base64.b64encode(image_data).replace('\n', '')
-                    data_uri = "data:image/%s;base64,%s" % (
-                        im.format.lower(), encoded)
-                    outline += '<img src="%s" width="%s" height="%s">' % (
-                        data_uri, im.size[0], im.size[1])
+                    outline += self.captured_files[char].html()
                     continue
                 changed = True
                 if char in "&<>":
@@ -2839,46 +3265,7 @@ class Terminal(object):
                 rend = renditions_store[rend] # Get actual rendition
                 if ord(char) >= special: # Special stuff =)
                     # Obviously, not really a single character
-                    if not Image: # Can't use images in the terminal
-                        outline += "<i>Image file</i>"
-                        continue # Can't do anything else
-                    image_file = self.images[char]
-                    image_file.seek(0) # Back to the start
-                    image_data = image_file.read()
-                    # PIL likes StringIO objects for some reason
-                    i = StringIO.StringIO(image_data)
-                    try:
-                        im = Image.open(i)
-                    except IOError:
-                        # i.e. PIL couldn't identify the file
-                        outline += "<i>Image file</i>"
-                        continue # Can't do anything else
-                    # TODO: Make these sizes adjustable:
-                    if im.size[0] > 640 or im.size[1] > 480:
-                        # Probably too big to send to browser as a data URI.
-                        if im: # Resize it...
-                            # 640x480 should come in <32k for most stuff
-                            try:
-                                image_file.seek(0)
-                                im.thumbnail((640, 480), Image.ANTIALIAS)
-                                im.save(image_file, im.format)
-                                # Re-read it in
-                                image_file.seek(0)
-                                image_data = image_file.read()
-                            except IOError:
-                                # Sometimes PIL will throw this if it can't read
-                                # the image.
-                                outline += "<i>Problem displaying this image</i>"
-                                continue
-                        else: # Generic error
-                            outline += "<i>Problem displaying this image</i>"
-                            continue
-                    # Need to encode base64 to create a data URI
-                    encoded = base64.b64encode(image_data).replace('\n', '')
-                    data_uri = "data:image/%s;base64,%s" % (
-                        im.format.lower(), encoded)
-                    outline += '<img src="%s" width="%s" height="%s">' % (
-                        data_uri, im.size[0], im.size[1])
+                    outline += self.captured_files[char].html()
                     continue
                 changed = True
                 if char in "&<>":
