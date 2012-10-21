@@ -4255,7 +4255,7 @@ go.Base.update(GateOne.Terminal, {
         resetTermButton.innerHTML = "Rescue Terminal";
         resetTermButton.title = "Attempts to rescue a hung terminal by performing a terminal reset; the equivalent of executing the 'reset' command.";
         resetTermButton.onclick = function() {
-            go.ws.send(JSON.stringify({'terminal_reset': localStorage[prefix+'selectedTerminal']}));
+            go.ws.send(JSON.stringify({'reset_terminal': localStorage[prefix+'selectedTerminal']}));
         }
         p.appendChild(resetTermButton);
         // Assign our visual terminal switching function (if not already assigned)
@@ -4476,12 +4476,16 @@ go.Base.update(GateOne.Terminal, {
                             if (!go.prefs.embedded) {
                                 // In embedded mode this kind of adjustment can be unreliable
                                 GateOne.Visual.applyTransform(termPre, ''); // Need to reset before we do the calculation
-                                var distance = goDiv.clientHeight - screenSpan.offsetHeight;
                                 GateOne.terminals[term]['heightAdjust'] = 0; // Have to set this as a default value for new terminals
                                 // Feel free to put something like this in updateTermCallbacks if you want.
                                 if (GateOne.Utils.isVisible(termPre)) {
-                                    var transform = "translateY(-" + distance + "px)";
+                                    // The timeout is here to ensure everything has settled down (completed animations and whatnot) before we do the distance calculation.
+                                    setTimeout(function() {
+                                        var distance = goDiv.clientHeight - termPre.offsetHeight,
+                                        transform = "translateY(-" + distance + "px)";
+                                        logInfo('distance: ' + distance);
                                     GateOne.Visual.applyTransform(termPre, transform); // Move it to the top so the scrollback isn't visible unless you actually scroll
+                                    }, 1100);
                                 }
                             }
                         }
@@ -4512,9 +4516,7 @@ go.Base.update(GateOne.Terminal, {
                 // This is a convenience for plugin authors:  Execute any incoming <script> tags automatically
                 var scriptElements = GateOne.terminals[term]['node'].querySelectorAll('script');
                 if (scriptElements.length) {
-                    console.log("Found script tags")
                     u.toArray(scriptElements).forEach(function(tag) {
-                        console.log("Calling eval on the script");
                         eval(tag.innerHTML);
                     });
                 }
