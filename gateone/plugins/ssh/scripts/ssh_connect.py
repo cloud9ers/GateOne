@@ -643,7 +643,7 @@ if __name__ == "__main__":
     TIMEOUT = 2 # seconds
     try:
         signal.alarm(TIMEOUT)
-        url = getpass("Connecting...")
+        url = getpass("Logging in...")
         signal.alarm(0)
         if bad_chars.match(url): 
             raiseException()
