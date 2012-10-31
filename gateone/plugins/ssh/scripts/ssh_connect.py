@@ -629,131 +629,41 @@ if __name__ == "__main__":
     bad_chars = re.compile('.*[\$\n\!\;&` |<>].*')
     # NOTE: This also means you can't use these characters in things like
     #       usernames or passwords (if using autoConnectURL).
+    
+    # Print the logo
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    logo_path = os.path.join(script_dir, 'logo.png')
+    if options.logo and 'GO_TERM' in os.environ.keys() and os.path.exists(logo_path):
+        with open(logo_path) as f:
+            sys.stdout.write(f.read())
+    
+    print("\x1b]0;[[Simtry]]: SSH Connect\007") # Set a pre-connection title as a Signal to JS
+    def raiseException(*args, **kwargs): raise Exception()
+    signal.signal(signal.SIGALRM, raiseException)
+    TIMEOUT = 2 # seconds
     try:
-        if len(args) == 1:
-            (user, host, port, password, identities) = parse_ssh_url(args[0])
-            openssh_connect(user, host, port,
-                command=options.command,
-                password=password,
-                sshfp=options.sshfp,
-                randomart=options.randomart,
-                identities=identities,
-                additional_args=options.additional_args,
-                socket=options.socket
-            )
-        elif len(args) == 2: # No port given, assume 22
-            openssh_connect(args[0], args[1], '22',
-                command=options.command,
-                sshfp=options.sshfp,
-                randomart=options.randomart,
-                additional_args=options.additional_args,
-                socket=options.socket
-            )
-        elif len(args) == 3:
-            openssh_connect(args[0], args[1], args[2],
-                command=options.command,
-                sshfp=options.sshfp,
-                randomart=options.randomart,
-                additional_args=options.additional_args,
-                socket=options.socket
-            )
-    except Exception:
-        pass # Something ain't right.  Try the interactive entry method...
-    password = None
-    try:
-        identities = []
-        protocol = None
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        logo_path = os.path.join(script_dir, 'logo.png')
-        logo = None
-        # Only show the logo image if running inside Gate One
-        if options.logo:
-            if 'GO_TERM' in os.environ.keys():
-                if os.path.exists(logo_path):
-                    with open(logo_path) as f:
-                        logo = f.read()
-                        # stdout instead of print so we don't get an extra newline
-                        sys.stdout.write(logo)
-        url = None
-        user = None
-        port = None
-        validated = False
-        invalid_hostname_err = _(
-            'Error:  You must enter a valid hostname or IP address.')
-        invalid_port_err = _(
-            'Error:  You must enter a valid port (1-65535).')
-        invalid_user_err = _(
-            'Error:  You must enter a valid username.')
-        default_host_str = " [%s]" % options.default_host
-        if options.default_host == "":
-            default_host_str = ""
-        # Set a pre-connection title
-        print("\x1b]0;SSH Connect\007")
-        while not validated:
-            url = getpass("")
-            if bad_chars.match(url):
-                noop = raw_input(invalid_hostname_err)
-                continue
-            if not url:
-                if options.default_host:
-                    host = options.default_host
-                    protocol = 'ssh'
-                    validated = True
-                else:
-                    noop = raw_input(invalid_hostname_err)
-                    continue
-            elif url.startswith('ssh://') or url.startswith('web+ssh'):
-                (user, host, port, password, identities) = parse_ssh_url(url)
-                protocol = 'ssh'
-            elif url.startswith('telnet://'): # This is a telnet URL
-                (user, host, port) = parse_telent_url(url)
-                protocol = 'telnet'
-            else:
-                continue # No interactive mode
-
-            if valid_hostname(host):
-                validated = True
-            else:
-                # Double-check: It might be an IPv6 address
-                # IPv6 addresses must be wrapped in brackets:
-                if '[' in host and ']' in host:
-                    no_brackets = host.strip('[]')
-                    if valid_ip(no_brackets):
-                        validated = True
-                    else:
-                        url = None
-                        noop = raw_input(invalid_hostname_err)
-                else:
-                    url = None
-                    noop = raw_input(invalid_hostname_err)
-        validated = False
-        while not validated:
-            if not port:
-                port = raw_input("Port [22]: ")
-                if not port:
-                    port = 22
-            try:
-                port = int(port)
-                if port <= 65535 and port > 1:
-                    validated = True
-                else:
-                    port = None
-                    noop = raw_input(invalid_port_err)
-            except ValueError:
-                port = None
-                noop = raw_input(invalid_port_err)
-        validated = False
-        while not validated:
-            if not user:
-                user = raw_input("User: ")
-                if not user:
-                    continue
-            if bad_chars.match(user):
-                noop = raw_input(invalid_user_err)
-                user = None
-            else:
-                validated = True
+        signal.alarm(TIMEOUT)
+        url = getpass("Connecting...")
+        signal.alarm(0)
+        if bad_chars.match(url): 
+            raiseException()
+        
+        if not url: 
+            raiseException()
+        
+        if url.startswith('ssh://') or url.startswith('web+ssh'):
+            (user, host, port, password, identities) = parse_ssh_url(url)
+            protocol = 'ssh'
+        elif url.startswith('telnet://'): # This is a telnet URL
+            (user, host, port) = parse_telent_url(url)
+            protocol = 'telnet'
+        else:
+            raiseException()
+    
+        host = "127.0.0.1" # Override whatever host is comming from JS!
+        
         if protocol == 'ssh':
+            print("\x1b]0;Connected\007")
             openssh_connect(user, host, port,
                 command=options.command,
                 password=password,
@@ -773,7 +683,7 @@ if __name__ == "__main__":
                 # Set title
                 print("\x1b]0;telnet://%s\007" % host)
             telnet_connect(user, host, port)
-    except (KeyboardInterrupt, EOFError):
-        print(_("\nUser requested exit.  Quitting..."))
-    except Exception as e: # Catch all
-        noop = raw_input(_("[Error: Press any key to close this terminal]"))
+        else:
+            raiseException()
+    except: # Catch all
+        pass
