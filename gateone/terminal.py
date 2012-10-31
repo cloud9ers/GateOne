@@ -146,10 +146,22 @@ Class Docstrings
 """
 
 # Import stdlib stuff
-import os, re, logging, base64, StringIO, codecs, unicodedata, tempfile
+import os, sys, re, logging, base64, StringIO, codecs, unicodedata, tempfile
 from array import array
 from datetime import datetime, timedelta
-from collections import defaultdict, OrderedDict
+from collections import defaultdict
+try:
+    from collections import OrderedDict
+except ImportError: # Python <2.7 didn't have OrderedDict in collections
+    try:
+        from ordereddict import OrderedDict
+    except ImportError:
+        logging.error(
+            "Error: Could not import OrderedDict.  Please install it:")
+        logging.error("\tsudo pip install ordereddict")
+        logging.error(
+            "...or download it from http://pypi.python.org/pypi/ordereddict")
+        sys.exit(1)
 from itertools import imap, izip
 
 # Inernationalization support
@@ -1018,7 +1030,7 @@ class Terminal(object):
     ASCII_HTS = 210   # Horizontal Tab Stop (HTS)
 
     charsets = {
-        'B': {}, # Default: USA
+        'B': {}, # Default is USA (aka 'B')
         '0': { # Line drawing mode
             95: u' ',
             96: u'◆',
@@ -1085,15 +1097,14 @@ class Terminal(object):
         retrieve these files (for security or convenience reasons).  Here's a
         real world example of how it works::
 
-            >> term = Terminal(rows=10, cols=40, temppath='/var/tmp', linkpath='/terminal')
-            >> term.write('About to write a PDF...\n')
-            >> pdf = open('/path/to/somefile.pdf').read()
-            >> term.write(pdf)
-            >> term.dump_html()
-            ([],
-            [u'About to write a PDF...                 ',
+            >>> term = Terminal(rows=10, cols=40, temppath='/var/tmp', linkpath='/terminal')
+            >>> term.write('About to write a PDF\\n')
+            >>> pdf = open('/path/to/somefile.pdf').read()
+            >>> term.write(pdf)
+            >>> term.dump_html()
+            ([u'About to write a PDF                    ',
             # <unnecessary lines of whitespace have been removed for this example>
-            u'<a target="_blank" href="/terminal/tmpZoOKVM.pdf">PDF Document</a>']
+            u'<a target="_blank" href="/terminal/tmpZoOKVM.pdf">PDF Document</a>'])
 
         The PDF file in question will reside in `/var/tmp` but the link was
         created as `href="/terminal/tmpZoOKVM.pdf"`.  As long as your web app
@@ -1343,7 +1354,7 @@ class Terminal(object):
         self.rend_counter = unicode_counter()
         # Used for mapping unicode chars to acutal renditions (to save memory):
         self.renditions_store = {
-            u' ': [0], # Nada, nothing, no rendition.  Not the same as below
+            u' ': [], # Nada, nothing, no rendition.  Not the same as below
             self.rend_counter.next(): [0] # Default is actually reset
         }
         self.prev_dump = [] # A cache to speed things up
@@ -1449,6 +1460,7 @@ class Terminal(object):
         Replaces :attr:`self.renditions` with arrays of *rendition* (characters)
         using :attr:`self.cols` and :attr:`self.rows` for the dimenions.
         """
+        logging.debug("init_renditions(%s)" % repr(rendition))
         # The actual renditions at various coordinates:
         self.renditions = [
             array('u', rendition * self.cols) for a in xrange(self.rows)]
@@ -1700,7 +1712,7 @@ class Terminal(object):
         #       when we're called via escape sequences.
         self.saved_cursorX = self.cursorX
         self.saved_cursorY = self.cursorY
-        self.saved_rendition = self.renditions[self.cursorY][self.cursorX]
+        self.saved_rendition = self.cur_rendition
 
     def restore_cursor_position(self, *args, **kwargs):
         """
@@ -1711,7 +1723,7 @@ class Terminal(object):
         if self.saved_cursorX and self.saved_cursorY:
             self.cursorX = self.saved_cursorX
             self.cursorY = self.saved_cursorY
-            self.renditions[self.cursorY][self.cursorX] = self.saved_rendition
+            self.cur_rendition = self.saved_rendition
 
     def _dsr_get_cursor_position(self):
         """
@@ -2207,10 +2219,6 @@ class Terminal(object):
 
     def backspace(self):
         """Execute a backspace (\\x08)"""
-        try:
-            self.renditions[self.cursorY][self.cursorX] = u' '
-        except IndexError:
-            pass # At the edge, no biggie
         self.cursor_left(1)
 
     def horizontal_tab(self):
@@ -2270,9 +2278,6 @@ class Terminal(object):
         """
         cols = self.cols
         self.cursorY += 1
-        # Do CR with every NL because that's how every other terminal emulator
-        # seems to do it
-        self.cursorX = 0
         if self.cursorY > self.bottom_margin:
             self.scroll_up()
             self.cursorY = self.bottom_margin
@@ -2303,7 +2308,7 @@ class Terminal(object):
         #if self.cursorX >= self.cols and self.cursorX != self.cols:
             #self.newline()
         if not self.capture:
-            self.cursorX = 0 # Yeah this is redundant if newline() is called
+            self.cursorX = 0
 
     def _xon(self):
         """

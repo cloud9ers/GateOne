@@ -2479,6 +2479,7 @@ GateOne.Base.update(GateOne.Input, {
         // This method translates ctrl/alt/meta key combos such as ctrl-c into their string equivalents.
         // NOTE: This differs from registerShortcut in that it handles sending keystrokes to the server.  registerShortcut is meant for client-side actions that call JavaScript (though, you certainly *could* send keystrokes via registerShortcut via JavaScript =)
         var goIn = go.Input,
+            u = go.Utils,
             key = goIn.key(e),
             modifiers = goIn.modifiers(e),
             buffer = goIn.bufferEscSeq,
@@ -2506,11 +2507,23 @@ GateOne.Base.update(GateOne.Input, {
                 }
             } else {
                 // Basic ASCII characters are pretty easy to convert to ctrl-<key> sequences...
-                if (key.code >= 97 && key.code <= 122) q(String.fromCharCode(key.code - 96)); // Ctrl-[a-z]
-                else if (key.code >= 65 && key.code <= 90) {
+                if (key.code >= 97 && key.code <= 122) {
+                    q(String.fromCharCode(key.code - 96)); // Ctrl-[a-z]
+                } else if (key.code >= 65 && key.code <= 90) {
                     if (key.code == 76) { // Ctrl-l gets some extra love
                         go.Net.fullRefresh(localStorage[go.prefs.prefix+'selectedTerminal']);
                         q(String.fromCharCode(key.code - 64));
+                    } else if (key.string == 'KEY_C') {
+                        // Check if the user has something highlighted.  If they do, assume they want to copy the text.
+                        // NOTE:  This shouldn't be *too* intrusive on regular Ctrl-C behavior since you can just press it twice if something is selected and it will have the normal effect of sending a SIGINT.  I don't know about YOU but when Ctrl-C doesn't work the first time I instinctively just mash that combo a few times :)
+                        if (u.getSelText()) {
+                            // Something is slected, let the native keystroke do its thing (it will automatically de-select the text afterwards)
+                            go.Visual.displayMessage("Text copied to clipboard.");
+                            goIn.handledKeystroke = true;
+                            return;
+                        } else {
+                            q(String.fromCharCode(key.code - 64)); // Send normal Ctrl-C
+                        }
                     } else {
                         q(String.fromCharCode(key.code - 64)); // More Ctrl-[a-z]
                     }
@@ -4161,7 +4174,7 @@ go.Base.update(GateOne.Terminal, {
                 termTitle = go.terminals[term]['title'];
             if (monitorInactivity.checked) {
                 var inactivity = function() {
-                    go.Terminal.notifyInactivity(termTitle);
+                    go.Terminal.notifyInactivity(term + ': ' + termTitle);
                     // Restart the timer
                     go.terminals[term]['inactivityTimer'] = setTimeout(inactivity, go.terminals[term]['inactivityTimeout']);
                 }
@@ -4483,7 +4496,6 @@ go.Base.update(GateOne.Terminal, {
                                     setTimeout(function() {
                                         var distance = goDiv.clientHeight - termPre.offsetHeight,
                                         transform = "translateY(-" + distance + "px)";
-                                        logInfo('distance: ' + distance);
                                     GateOne.Visual.applyTransform(termPre, transform); // Move it to the top so the scrollback isn't visible unless you actually scroll
                                     }, 1100);
                                 }
@@ -4575,7 +4587,7 @@ go.Base.update(GateOne.Terminal, {
             // Take care of the activity/inactivity notifications
             if (GateOne.terminals[term]['inactivityTimer']) {
                 clearTimeout(GateOne.terminals[term]['inactivityTimer']);
-                var inactivity = u.partial(GateOne.Terminal.notifyInactivity, termTitle);
+                var inactivity = u.partial(GateOne.Terminal.notifyInactivity, term + ': ' + termTitle);
                 try {
                     GateOne.terminals[term]['inactivityTimer'] = setTimeout(inactivity, GateOne.terminals[term]['inactivityTimeout']);
                 } finally {
@@ -4586,7 +4598,7 @@ go.Base.update(GateOne.Terminal, {
                 if (!GateOne.terminals[term]['lastNotifyTime']) {
                     // Setup a minimum delay between activity notifications so we're not spamming the user
                     GateOne.terminals[term]['lastNotifyTime'] = new Date();
-                    GateOne.Terminal.notifyActivity(termTitle);
+                    GateOne.Terminal.notifyActivity(term + ': ' + termTitle);
                 } else {
                     var then = new Date(GateOne.terminals[term]['lastNotifyTime']),
                         now = new Date();
@@ -4594,7 +4606,7 @@ go.Base.update(GateOne.Terminal, {
                         then.setSeconds(then.getSeconds() + 5); // 5 seconds between notifications
                         if (now > then) {
                             GateOne.terminals[term]['lastNotifyTime'] = new Date(); // Reset
-                            GateOne.Terminal.notifyActivity(termTitle);
+                            GateOne.Terminal.notifyActivity(term + ': ' + termTitle);
                         }
                     } finally {
                         then = null;
@@ -4688,13 +4700,13 @@ go.Base.update(GateOne.Terminal, {
     },
     notifyInactivity: function(term) {
         // Notifies the user of inactivity in *term*
-        var message = "Inactivity in terminal: " + term;
+        var message = "Inactivity in terminal " + term;
         GateOne.Visual.playBell();
         console.info(message);
     },
     notifyActivity: function(term) {
         // Notifies the user of activity in *term*
-        var message = "Activity in terminal: " + term;
+        var message = "Activity in terminal " + term;
         GateOne.Visual.playBell();
         console.info(message);
     },
@@ -4907,7 +4919,9 @@ go.Base.update(GateOne.Terminal, {
             go.Terminal.pasteAreaTimer = setTimeout(function() {
                 pastearea.onmousemove = go.Input.pasteareaTemp;
                 go.Terminal.pasteAreaTimer = null;
-                u.showElement(pastearea);
+                if (!u.getSelText()) {
+                    u.showElement(pastearea);
+                }
             }, timeout);
         }
         pastearea.onmousedown = function(e) {
@@ -5310,7 +5324,6 @@ GateOne.Base.update(GateOne.User, {
     },
     storeSession: function(message) {
         //  Stores the 'gateone_user' data in localStorage in a nearly identical fashion to how it gets stored in the 'gateone_user' cookie.
-        console.log('message: ' + message);
         localStorage[GateOne.prefs.prefix+'gateone_user'] = message;
         // Delete the cookie just in case (it might be a leftover from testing during development; or something like that)
         // Commented out the following because it still needs testing...  Probably won't work in many embedded situations since the browser won't let the client access a cookie belonging to a different FQDN.
