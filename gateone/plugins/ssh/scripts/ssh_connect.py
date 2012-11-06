@@ -640,7 +640,7 @@ if __name__ == "__main__":
     print("\x1b]0;[[Simtry]]: SSH Connect\007") # Set a pre-connection title as a Signal to JS
     def raiseException(*args, **kwargs): raise Exception()
     signal.signal(signal.SIGALRM, raiseException)
-    TIMEOUT = 2 # seconds
+    TIMEOUT = 1 # second
     try:
         signal.alarm(TIMEOUT)
         url = getpass("Logging in...")
